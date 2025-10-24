@@ -1,0 +1,21 @@
+# ===== ADD TO printer.cfg =====
+# 
+# [auto_light]
+# pin: case_light              # The LED/light PIN name (as defined in [output_pin])
+# morning_hour: 8              # Hour to start low brightness (0-23)
+# evening_hour: 20             # Hour to start high brightness (0-23)
+# day_brightness: 0.3          # Day brightness (0.0-1.0)
+# night_brightness: 1.0        # Night brightness (0.0-1.0)
+# check_interval: 600          # Check every X seconds (minimum: 60, default: 600)
+# enabled: True                # Auto-enable on startup (True/False)
+#
+# ===== AVAILABLE G-CODE COMMANDS =====
+#
+# SET_AUTO_LIGHT              - Manual check now
+# AUTO_LIGHT_ENABLE           - Enable automatic control
+# AUTO_LIGHT_DISABLE          - Disable automatic control
+#
+# ===== MACRO EXAMPLE =====
+#
+# You can add this to your START_PRINT macro:
+# SET_AUTO_LIGHT              # Adjust lighting before print starts
