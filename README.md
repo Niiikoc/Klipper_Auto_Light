@@ -20,8 +20,10 @@ You can define custom brightness levels for **daytime** and **nighttime**, and t
 ### 1️⃣ Connect to your Raspberry Pi via SSH
 
 ```bash
-ssh pi@{printer_IP}.local  <= Replace {printer_IP} with the IP address of your printer.
+ssh pi@{printer_IP}.local
 ```
+Replace {printer_IP} with the IP address of your printer.
+
 2️⃣ Navigate to the Klipper extras directory
 
 ```bash
@@ -30,9 +32,15 @@ cd ~/klipper/klippy/extras
 
 3️⃣ Clone the repository
 ```bash
-git clone https://github.com/Niiikoc/Klipper_Auto_Light.git
+curl -O https://raw.githubusercontent.com/Niiikoc/Klipper_Auto_Light/main/auto_light.py
 ```
 This will create a new folder named Klipper_Auto_Light containing the auto_light.py script.
+
+5️⃣ Restart Klipper
+
+```bash
+FIRMWARE_RESTART
+```
 
 4️⃣ Edit your printer.cfg
 
@@ -51,11 +59,17 @@ enabled: True                # Auto-enable on startup (True/False)
 
 **⚠️ Make sure the light_pin matches your printer’s hardware pin for the case light.**
 
-5️⃣ Restart Klipper
 
-```bash
-FIRMWARE_RESTART
-```
+**🧩 Available G-Code Commands**
+
+You can manually control or test the light anytime using these G-Code commands:
+
+| Command	       | Description  |
+|----------------|--------------|
+| SET_AUTO_LIGHT | 	Triggers an immediate time check and adjusts light accordingly |
+| AUTO_LIGHT_ENABLE | Enables automatic control |
+| AUTO_LIGHT_DISABLE | Disables automatic control |
+
 
 **🧠 How It Works**
 
@@ -95,3 +109,7 @@ The script uses your Raspberry Pi’s system time — make sure your timezone is
 Works with any Klipper-supported light control pin.
 
 You can combine it with other light control macros for manual overrides if desired.
+
+🪄 License
+
+This project is licensed under the MIT License.
