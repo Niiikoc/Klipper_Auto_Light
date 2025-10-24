@@ -97,7 +97,7 @@ If you ever want to remove it:
 
 ```bash
 cd ~/klipper/klippy/extras
-rm -rf Klipper_Auto_Light
+rm -f auto_light.py
 ```
 
 Then remove the [auto_light] section from your printer.cfg and restart Klipper.
