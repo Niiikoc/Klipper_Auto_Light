@@ -1,21 +1,37 @@
 # ===== ADD TO printer.cfg =====
 # 
 # [auto_light]
-# pin: case_light              # The LED/light PIN name (as defined in [output_pin])
-# morning_hour: 8              # Hour to start low brightness (0-23)
-# evening_hour: 20             # Hour to start high brightness (0-23)
-# day_brightness: 0.3          # Day brightness (0.0-1.0)
-# night_brightness: 1.0        # Night brightness (0.0-1.0)
-# check_interval: 600          # Check every X seconds (minimum: 60, default: 600)
-# enabled: True                # Auto-enable on startup (True/False)
+# pin: case_light              # The LED/light PIN name
+# check_interval: 600          # Check every X seconds (default: 600 = 10 minutes)
+# enabled: True                # Auto-enable on startup
+# 
+# # Define up to 5 schedules (format: HH:MM-HH:MM=brightness)
+# # You can define 1-5 schedules. At least 1 is required.
+# schedule_1: 07:00-14:00=1.0     # Morning: 100% brightness
+# schedule_2: 14:00-19:00=0.6     # Afternoon: 60% brightness  
+# schedule_3: 19:00-23:00=0.3     # Evening: 30% brightness
+# schedule_4: 23:00-07:00=0.1     # Night: 10% brightness
+# # schedule_5: 12:00-13:00=0.5   # Optional 5th schedule
+#
+# # Brightness range: 0.0 (off) to 1.0 (full)
+# # Schedules can cross midnight (e.g., 23:00-07:00)
 #
 # ===== AVAILABLE G-CODE COMMANDS =====
 #
-# SET_AUTO_LIGHT              - Manual check now
-# AUTO_LIGHT_ENABLE           - Enable automatic control
-# AUTO_LIGHT_DISABLE          - Disable automatic control
+# SET_AUTO_LIGHT                         - Check and apply brightness now
+# AUTO_LIGHT_ENABLE                      - Enable automatic control
+# AUTO_LIGHT_DISABLE                     - Disable automatic control
+# AUTO_LIGHT_LIST_SCHEDULES              - List all schedules and their status
+# AUTO_LIGHT_SCHEDULE_ENABLE ID=1        - Enable schedule 1 (1-5)
+# AUTO_LIGHT_SCHEDULE_DISABLE ID=2       - Disable schedule 2 (1-5)
 #
-# ===== MACRO EXAMPLE =====
+# ===== EXAMPLES =====
 #
-# You can add this to your START_PRINT macro:
-# SET_AUTO_LIGHT              # Adjust lighting before print starts
+# # Disable afternoon schedule temporarily
+# AUTO_LIGHT_SCHEDULE_DISABLE ID=2
+#
+# # Re-enable it later
+# AUTO_LIGHT_SCHEDULE_ENABLE ID=2
+#
+# # See all schedules and their status
+# AUTO_LIGHT_LIST_SCHEDULES
