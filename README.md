@@ -14,8 +14,7 @@ You can define up to **5 custom time schedules** with different brightness level
 - 🕰️ Runs automatically on startup — no manual control needed  
 - 🔧 Enable/disable individual schedules via G-Code commands  
 - 🌍 Schedules can span across midnight (e.g., 23:00-07:00)  
-- 🧩 Fully configurable via `printer.cfg`  
-- 🏠 Full Home Assistant integration via Moonraker  
+- 🧩 Fully configurable via `printer.cfg`
 
 ---
 
