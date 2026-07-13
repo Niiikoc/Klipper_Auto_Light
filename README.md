@@ -67,6 +67,49 @@ FIRMWARE_RESTART
 
 ---
 
+## 🔄 Updating via Moonraker (Update Manager)
+
+Instead of the loose-file `curl` method above, you can install the module as a
+git repository so it appears in Mainsail/Fluidd's **Update** panel and can be
+updated with a single click.
+
+### 1️⃣ Clone the repo and run the installer
+```bash
+cd ~
+git clone https://github.com/Niiikoc/Klipper_Auto_Light.git
+cd ~/Klipper_Auto_Light
+chmod +x install.sh
+./install.sh
+```
+The installer symlinks `auto_light.py` into `~/klipper/klippy/extras/`, so
+updates pulled by Moonraker take effect immediately.
+
+> **Note:** If you previously installed with the `curl` method, delete the old
+> copy first so the symlink can be created:
+> `rm -f ~/klipper/klippy/extras/auto_light.py`
+
+### 2️⃣ Add the Update Manager section to `moonraker.conf`
+```ini
+[update_manager auto_light]
+type: git_repo
+path: ~/Klipper_Auto_Light
+origin: https://github.com/Niiikoc/Klipper_Auto_Light.git
+primary_branch: main
+managed_services: klipper
+install_script: install.sh
+```
+
+### 3️⃣ Restart Moonraker
+```bash
+sudo systemctl restart moonraker
+```
+
+`auto_light` will now show up in the Update Manager. When a new version is
+pushed to GitHub, click **Update** and Moonraker pulls the changes and restarts
+Klipper for you.
+
+---
+
 ## 🧩 Available G-Code Commands
 
 You can manually control or test the light anytime using these G-Code commands:
