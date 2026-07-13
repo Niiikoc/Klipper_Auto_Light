@@ -12,6 +12,7 @@ You can define up to **5 custom time schedules** with different brightness level
 - 🌙 Define different brightness for morning, afternoon, evening, and night  
 - ⚙️ Simple integration with Klipper  
 - 🕰️ Runs automatically on startup — no manual control needed  
+- 💾 Remembers its enabled/disabled state across restarts  
 - 🔧 Enable/disable individual schedules via G-Code commands  
 - 🌍 Schedules can span across midnight (e.g., 23:00-07:00)  
 - 🧩 Fully configurable via `printer.cfg`
@@ -42,7 +43,9 @@ curl -O https://raw.githubusercontent.com/Niiikoc/Klipper_Auto_Light/main/auto_l
 [auto_light]
 pin: caselight              # The LED/light PIN name (as defined in [output_pin])
 check_interval: 600         # Check every X seconds (default: 600 = 10 minutes)
-enabled: True               # Auto-enable on startup
+enabled: True               # Default state on first startup (see note below)
+# state_file: ~/printer_data/config/auto_light_state.json  # Optional: where the
+                            # enabled/disabled state is saved (defaults next to printer.cfg)
 
 # Define up to 5 schedules (format: HH:MM-HH:MM=brightness)
 # At least 1 schedule is required. Brightness range: 0.0 (off) to 1.0 (full)
@@ -59,6 +62,7 @@ schedule_4: 23:00-07:00=0.1     # Night: 10% brightness
 - You can define **1 to 5 schedules** based on your needs
 - Schedules can cross midnight (e.g., `23:00-07:00`)
 - Times use 24-hour format with minutes (HH:MM)
+- **`enabled` is only the default for the very first startup.** Once you use `AUTO_LIGHT_ENABLE`/`AUTO_LIGHT_DISABLE`, that choice is saved to `state_file` and restored after every restart — so a disabled light stays disabled until you re-enable it (no need to edit `printer.cfg`)
 
 ### 5️⃣ Restart Klipper
 ```gcode
@@ -117,12 +121,11 @@ You can manually control or test the light anytime using these G-Code commands:
 | Command | Description |
 |---------|-------------|
 | `SET_AUTO_LIGHT` | Triggers an immediate check and adjusts light to current schedule |
-| `AUTO_LIGHT_ENABLE` | Enables automatic control |
-| `AUTO_LIGHT_DISABLE` | Disables automatic control |
+| `AUTO_LIGHT_ENABLE` | Enables automatic control (saved — persists across restarts) |
+| `AUTO_LIGHT_DISABLE` | Disables automatic control (saved — persists across restarts) |
 | `AUTO_LIGHT_LIST_SCHEDULES` | Lists all configured schedules and their status |
 | `AUTO_LIGHT_SCHEDULE_ENABLE ID=X` | Enables schedule X (1-5) |
 | `AUTO_LIGHT_SCHEDULE_DISABLE ID=X` | Disables schedule X (1-5) |
-| `AUTO_LIGHT_RESET_CACHE` | Resets cached brightness (forces update on next check) |
 
 ### Examples:
 ```gcode
@@ -149,6 +152,7 @@ SET_AUTO_LIGHT
 4. During each time period, the light automatically adjusts to the configured brightness
 5. If you manually change the brightness, it will be corrected on the next check cycle
 6. You can enable/disable individual schedules without restarting Klipper
+7. When you enable or disable auto control, the state is saved to a small JSON file (`state_file`) and restored automatically after a restart
 
 ---
 
@@ -215,12 +219,20 @@ This is perfect for:
 
 ## 🧩 Uninstallation
 
-If you ever want to remove it:
+**If you installed with the `curl` method:**
 ```bash
 cd ~/klipper/klippy/extras
 rm -f auto_light.py
 ```
-Then remove the `[auto_light]` section from your `printer.cfg` and restart Klipper.
+
+**If you installed via the Update Manager (git clone):**
+```bash
+rm -f ~/klipper/klippy/extras/auto_light.py   # remove the symlink
+rm -rf ~/Klipper_Auto_Light                    # remove the cloned repo
+```
+Then remove the `[update_manager auto_light]` block from your `moonraker.conf` and restart Moonraker.
+
+**In both cases:** remove the `[auto_light]` section from your `printer.cfg`, delete the leftover `auto_light_state.json` from your config folder if present, and restart Klipper.
 
 ---
 
@@ -249,6 +261,12 @@ Feel free to check the [issues page](https://github.com/Niiikoc/Klipper_Auto_Lig
 ---
 
 ## 📝 Changelog
+
+### v2.1.0
+- 💾 Enable/disable state now persists across restarts (saved to a JSON state file)
+- ⚙️ New optional `state_file` config option to customize where state is stored
+- 🔄 Added Moonraker Update Manager support (`install.sh`) for one-click updates
+- 🐛 Removed a non-existent `AUTO_LIGHT_RESET_CACHE` command from the docs
 
 ### v2.0.0
 - ✨ Added support for up to 5 custom time schedules
