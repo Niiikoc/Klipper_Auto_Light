@@ -1,15 +1,23 @@
 import datetime
 import logging
+import os
+import json
 
 class AutoLight:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
-        
+
         # Basic settings
         self.pin_name = config.get('pin', 'case_light')
         self.check_interval = config.getfloat('check_interval', 600.0, minval=60.0)
         self.enabled = config.getboolean('enabled', True)
+
+        # State file for persisting the enabled flag across restarts.
+        # Defaults to sitting next to the printer config so no extra
+        # Klipper module (e.g. [save_variables]) is required.
+        self.state_file = os.path.expanduser(
+            config.get('state_file', self._default_state_file()))
         
         # Parse up to 5 schedules from config
         self.schedules = []
@@ -94,7 +102,10 @@ class AutoLight:
             self.gcode.register_command('AUTO_LIGHT_LIST_SCHEDULES',
                                        self.cmd_AUTO_LIGHT_LIST_SCHEDULES,
                                        desc=self.cmd_AUTO_LIGHT_LIST_SCHEDULES_help)
-            
+
+            # Restore persisted current state (overrides config default)
+            self._load_current_state()
+
             # Start auto check if enabled
             if self.enabled:
                 self.start_auto_check()
@@ -105,6 +116,46 @@ class AutoLight:
     def _handle_shutdown(self):
         """Called on shutdown - cleanup"""
         self.stop_auto_check()
+
+    def _default_state_file(self):
+        """Pick a default state-file path next to the printer config."""
+        try:
+            config_file = self.printer.get_start_args().get('config_file')
+            if config_file:
+                return os.path.join(os.path.dirname(config_file),
+                                    'auto_light_state.json')
+        except Exception:
+            pass
+        # Fallback to the home directory if the config path is unavailable
+        return os.path.expanduser('~/auto_light_state.json')
+
+    def _load_current_state(self):
+        """Restore the current state from the state file.
+
+        Falls back to the config default when no state has been saved yet."""
+        try:
+            if not os.path.exists(self.state_file):
+                return
+            with open(self.state_file, 'r') as f:
+                data = json.load(f)
+            if 'enabled' in data:
+                self.enabled = bool(data['enabled'])
+                logging.info(f"AutoLight: Restored persisted state: "
+                             f"enabled={self.enabled}")
+        except Exception as e:
+            logging.error(f"AutoLight: Could not load persisted state "
+                          f"from {self.state_file}: {e}")
+
+    def _save_current_state(self):
+        """Persist the current state to the state file (atomic write)."""
+        try:
+            tmp_file = self.state_file + '.tmp'
+            with open(tmp_file, 'w') as f:
+                json.dump({'enabled': self.enabled}, f)
+            os.replace(tmp_file, self.state_file)
+        except Exception as e:
+            logging.error(f"AutoLight: Could not save persisted state "
+                          f"to {self.state_file}: {e}")
     
     def _get_minutes_from_midnight(self, hour, minute):
         """Convert hour:minute to minutes from midnight"""
@@ -292,6 +343,7 @@ class AutoLight:
         """Enable automatic control"""
         self.enabled = True
         self.start_auto_check()
+        self._save_current_state()
         gcmd.respond_info("AutoLight: ENABLED")
         logging.info("AutoLight: Enabled via G-code")
     
@@ -300,6 +352,7 @@ class AutoLight:
         """Disable automatic control"""
         self.enabled = False
         self.stop_auto_check()
+        self._save_current_state()
         gcmd.respond_info("AutoLight: DISABLED")
         logging.info("AutoLight: Disabled via G-code")
     
