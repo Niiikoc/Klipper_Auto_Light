@@ -442,6 +442,9 @@ then the config wins. A state saved by v2 (`AUTO_LIGHT_DISABLE`) is kept and ann
 | `effect '...' not found` | Install klipper-led_effect and define `[led_effect <name>]` with exactly that name |
 | No dialog appears | The control panel needs Mainsail v2.9+; use the `AUTOLIGHT_*` buttons otherwise |
 | Hex colour ignored | Don't write `#` before the hex value |
+| Light is off after `FIRMWARE_RESTART` | Klipper restarts every `[output_pin]` at its `value:` (0 by default). With Auto Light on, the light then fades to its automatic value (with `idle: off` it stays off). With Auto Light off, set `value: 1` in `[output_pin ...]` to start it on |
+| `error:` value not shown | It applies when a print stops with an error while Klipper keeps running (e.g. a G-code or macro error). On a Klipper **shutdown** (thermal runaway, MCU lost, "Timer too close") every module stops, Auto Light included |
+| Light doesn't change when automation is off | Expected: `AUTO_LIGHT_DISABLE` leaves the light as it is. Without `LIGHT=` it turns off **all** groups |
 | Something else | Search `klippy.log` for `AutoLight` and open an [issue](https://github.com/Niiikoc/Klipper_Auto_Light/issues) with that part of the log |
 
 ---
