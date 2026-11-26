@@ -244,7 +244,7 @@ Run `AUTO_LIGHT_MENU` (or click **AUTOLIGHT_PANEL**, see below) and a dialog ope
 
 - Current state of every group (colour/effect, active schedule, manual or paused)
 - **Auto / On / Dim / Off** buttons per group
-- A button for every effect used in that group, to try them out
+- A button for every effect used in that group, to try them out (plays for `finish_hold` seconds)
 - **Pause / Resume automation**
 
 Requires Mainsail v2.9 or newer (macro prompts). Other interfaces simply show the
@@ -257,7 +257,7 @@ With `[include auto_light_macros.cfg]` you get these buttons in the Macros panel
 |---|---|
 | `AUTOLIGHT_PANEL` | Opens the control panel |
 | `AUTOLIGHT_AUTO` | Back to automatic |
-| `AUTOLIGHT_ON` | On until the next automatic change (`VALUE=` optional: `warm@0.5`, `effect:rainbow`…) |
+| `AUTOLIGHT_ON` | On until the next automatic change (`VALUE=` optional: `warm@0.5`, `effect:rainbow`…; `DURATION=` seconds optional) |
 | `AUTOLIGHT_OFF` | Off until the next automatic change |
 
 All accept an optional `LIGHT=<group>`.
@@ -310,16 +310,26 @@ A plain `[auto_light]` (no name) is addressed as `LIGHT=default`.
 | `SET_AUTO_LIGHT [LIGHT=]` | Re-apply the value for the current time/print state now |
 | `AUTO_LIGHT_ENABLE [LIGHT=]` | Enable automatic control (saved across restarts) |
 | `AUTO_LIGHT_DISABLE [LIGHT=]` | Disable automatic control (saved across restarts) |
-| `AUTO_LIGHT_SET VALUE= [LIGHT=]` | Temporarily set a value, colour or effect (e.g. `VALUE=warm@0.5`, `VALUE=effect:rainbow`) until the next change |
+| `AUTO_LIGHT_SET VALUE= [LIGHT=] [DURATION=]` | Temporarily set a value, colour or effect (e.g. `VALUE=warm@0.5`, `VALUE=effect:rainbow`) — see below |
 | `AUTO_LIGHT_MENU [LIGHT=]` | Open the control panel dialog (Mainsail) |
 | `AUTO_LIGHT_LIST_SCHEDULES [LIGHT=]` | Show lights, schedules, print values and status |
 | `AUTO_LIGHT_SCHEDULE_ENABLE ID= [LIGHT=]` | Enable schedule ID (saved) |
 | `AUTO_LIGHT_SCHEDULE_DISABLE ID= [LIGHT=]` | Disable schedule ID (saved) |
 
+### How long does `AUTO_LIGHT_SET` last?
+| Value | Without `DURATION` | With `DURATION=30` | With `DURATION=0` |
+|---|---|---|---|
+| Colour / brightness / `off` | Until the next schedule or print change | 30 s, then automatic | Until the next change |
+| `effect:name` | `finish_hold` seconds (default 300), then automatic | 30 s, then automatic | Until the next change |
+
+`SET_AUTO_LIGHT` (or the **Auto** button) always returns to automatic immediately,
+and starting a print ends any manual value.
+
 ### Examples
 ```gcode
 AUTO_LIGHT_SCHEDULE_DISABLE ID=2            # Working late: skip the evening dim
 AUTO_LIGHT_SET VALUE=FF8800@0.5 LIGHT=logo  # Preview a colour
+AUTO_LIGHT_SET VALUE=effect:rainbow DURATION=10  # Try an effect for 10 s
 SET_AUTO_LIGHT                              # Back to the automatic value
 AUTO_LIGHT_DISABLE LIGHT=nozzle             # Turn off automation for one group
 ```
@@ -421,6 +431,7 @@ Feel free to check the [issues page](https://github.com/Niiikoc/Klipper_Auto_Lig
 - 🌅 Smooth fades (`fade_time`)
 - ✨ klipper-led_effect integration: `effect:<name>` values with crossfades
 - 🖱️ `AUTO_LIGHT_MENU` control panel (Mainsail) and `auto_light_macros.cfg` buttons
+- ⏲️ `AUTO_LIGHT_SET ... DURATION=`; effects started by hand stop on their own after `finish_hold`
 - ⏱️ Changes happen exactly at schedule boundaries instead of every `check_interval`
 - ✋ Manual light changes are no longer overwritten until the next scheduled change
 - 💾 Disabled schedules are now saved across restarts too

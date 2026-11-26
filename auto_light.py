@@ -274,17 +274,25 @@ class AutoLightManager:
             light.set_enabled(False)
             gcmd.respond_info("AutoLight [%s]: DISABLED" % light.light_name)
 
-    cmd_AUTO_LIGHT_SET_help = ("Temporarily set a value (e.g. VALUE=warm@0.5) "
-                               "until the next schedule or print change")
+    cmd_AUTO_LIGHT_SET_help = ("Temporarily set a value (VALUE=warm@0.5 or "
+                               "effect:name) [DURATION=seconds]")
 
     def cmd_AUTO_LIGHT_SET(self, gcmd):
+        self._set_manual(gcmd)
+
+    def _set_manual(self, gcmd):
         text = gcmd.get('VALUE')
-        lights = self._select(gcmd)
-        for light in lights:
-            color = light.parse_command_value(gcmd, text)
-            light.set_manual(color)
-            gcmd.respond_info("AutoLight [%s]: set to %s until the next "
-                              "change" % (light.light_name, describe(color)))
+        duration = gcmd.get_float('DURATION', None, minval=0.)
+        for light in self._select(gcmd):
+            value = light.parse_command_value(gcmd, text)
+            seconds = light.set_manual(value, duration)
+            if seconds:
+                until = "for %d s" % round(seconds)
+            else:
+                until = ("until the next change (SET_AUTO_LIGHT LIGHT=%s "
+                         "returns to automatic)" % light.light_name)
+            gcmd.respond_info("AutoLight [%s]: %s %s"
+                              % (light.light_name, describe(value), until))
 
     cmd_AUTO_LIGHT_SCHEDULE_ENABLE_help = "Enable a schedule (ID=n)"
 
@@ -320,9 +328,7 @@ class AutoLightManager:
             for light in lights:
                 light.resume_auto()
         elif action == 'set':
-            for light in lights:
-                light.set_manual(light.parse_command_value(
-                    gcmd, gcmd.get('VALUE')))
+            self._set_manual(gcmd)
         elif action in ('enable', 'disable'):
             for light in lights:
                 light.set_enabled(action == 'enable')
@@ -466,6 +472,8 @@ class AutoLight:
         self.print_state_since = 0.
         self.mode = None            # what the automation selected
         self.manual = None          # value set by hand, until next change
+        self.manual_timer = None    # ends a timed manual value
+        self.manual_until = None    # reactor time the manual value ends
         self.active_schedule = None
         self.target = None          # value the automation wants
         self.current = None         # last colour sent (None during effects)
@@ -573,6 +581,7 @@ class AutoLight:
         self._load_state()
         self.update_timer = self.reactor.register_timer(self._update_cb)
         self.output_timer = self.reactor.register_timer(self._output_cb)
+        self.manual_timer = self.reactor.register_timer(self._manual_end_cb)
         if self.enabled:
             self.request_update(force=True)
 
@@ -683,7 +692,7 @@ class AutoLight:
             self.active_schedule = sched
             if value is not None and (changed or self.force):
                 self.target = value
-                self.manual = None
+                self._clear_manual()
                 self.apply(value)
                 if changed:
                     label = sched.name if sched is not None else mode
@@ -817,9 +826,39 @@ class AutoLight:
                              "only effects or off" % self.light_name)
         return value
 
-    def set_manual(self, value):
+    def set_manual(self, value, duration=None):
+        """Show a value by hand. Effects end on their own after
+        `finish_hold` seconds unless DURATION is given (0 = until the next
+        automatic change); colours last until the next change by default.
+        Returns the duration in seconds (0 = until the next change)."""
+        if duration is None:
+            duration = self.finish_hold if is_effect(value) else 0.
         self.manual = value
         self.apply(value)
+        self.manual_until = None
+        if self.manual_timer is not None:
+            waketime = self.reactor.NEVER
+            if duration > 0.:
+                waketime = self.manual_until = (self.reactor.monotonic()
+                                                + duration)
+            self.reactor.update_timer(self.manual_timer, waketime)
+        return duration
+
+    def _clear_manual(self):
+        self.manual = None
+        self.manual_until = None
+        if self.manual_timer is not None:
+            self.reactor.update_timer(self.manual_timer, self.reactor.NEVER)
+
+    def _manual_end_cb(self, eventtime):
+        if self.manual is not None:
+            self.manual = None
+            self.manual_until = None
+            if self.enabled:
+                self.request_update(force=True)
+            elif self.active_effect:
+                self.apply(OFF)          # paused: just stop the effect
+        return self.reactor.NEVER
 
     def resume_auto(self):
         if not self.enabled:
@@ -876,7 +915,11 @@ class AutoLight:
         if not self.enabled:
             state = "automation paused"
         elif self.manual is not None:
-            state = "manual until next change"
+            if self.manual_until is not None:
+                left = max(0., self.manual_until - self.reactor.monotonic())
+                state = "manual, %d s left" % round(left)
+            else:
+                state = "manual until next change"
         elif self.active_schedule is not None:
             state = "%s (%s)" % (self.active_schedule.name,
                                  self.active_schedule.span())
