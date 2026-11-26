@@ -3,6 +3,8 @@
 **Klipper Auto Light** is a lightweight Klipper extension that runs your printer's lights for you:
 case lights, LED strips and neopixels follow the time of day, react to your prints
 (bright while printing, a green "done" glow, red on error) and fade smoothly between it all.
+With [klipper-led_effect](https://github.com/julianschill/klipper-led_effect) installed it can
+also switch animations for you — without you writing a single macro.
 
 ---
 
@@ -14,6 +16,8 @@ case lights, LED strips and neopixels follow the time of day, react to your prin
 - 🧩 **Several lights at once**, whole chains or only some LEDs (`sb_leds:2-3`)
 - 🖨️ **Print-aware**: own value while printing / paused, a "done" or "error" colour after the print, then back to the schedule
 - 🌅 **Smooth fades** between every change (e.g. slowly dim when a print finishes)
+- ✨ **Animations via [klipper-led_effect](https://github.com/julianschill/klipper-led_effect)** — rainbow, breathing, comet… picked automatically by time or print state
+- 🖱️ **Control panel in Mainsail** plus ready-made macro buttons for Mainsail / Fluidd
 - 🎛️ Independent light groups with `[auto_light name]` sections — combine them however you like
 - ✋ Manual changes are respected until the next schedule or print change
 - 💾 Enabled/disabled state (and disabled schedules) survive restarts
@@ -54,7 +58,15 @@ print-aware lighting, fades and multiple lights, and
 
 > Older configs that use `pin:` instead of `lights:` keep working unchanged.
 
-### 5️⃣ Restart Klipper
+### 5️⃣ Optional: buttons for Mainsail / Fluidd
+```bash
+cd ~/printer_data/config
+curl -O https://raw.githubusercontent.com/Niiikoc/Klipper_Auto_Light/main/auto_light_macros.cfg
+```
+and add `[include auto_light_macros.cfg]` to `printer.cfg`
+(see [🖱️ Control from Mainsail / Fluidd](#️-control-from-mainsail--fluidd)).
+
+### 6️⃣ Restart Klipper
 ```gcode
 FIRMWARE_RESTART
 ```
@@ -75,8 +87,11 @@ cd ~/Klipper_Auto_Light
 chmod +x install.sh
 ./install.sh
 ```
-The installer symlinks `auto_light.py` into `~/klipper/klippy/extras/`, so
-updates pulled by Moonraker take effect immediately.
+The installer symlinks `auto_light.py` into `~/klipper/klippy/extras/` and
+`auto_light_macros.cfg` into `~/printer_data/config/`, so updates pulled by
+Moonraker take effect immediately. Add `[include auto_light_macros.cfg]` to
+`printer.cfg` if you want the UI buttons.
+(Other locations: `KLIPPER_PATH=... CONFIG_PATH=... ./install.sh`)
 
 > **Note:** If you previously installed with the `curl` method, delete the old
 > copy first so the symlink can be created:
@@ -157,6 +172,7 @@ Every schedule, `default`, print value and the `AUTO_LIGHT_SET` command accept:
 | `FF8800` | Hex colour `RRGGBB` — **without `#`** (Klipper treats `#` as a comment) |
 | `FFFFFF80` | Hex `RRGGBBWW` for RGBW strips (white channel) |
 | `warm@0.4` | Any colour at a given brightness |
+| `effect:rainbow` | Run `[led_effect rainbow]` (see [✨ LED Effects](#-led-effects-klipper-led_effect)) |
 
 On an `[output_pin]` a colour simply becomes its brightness (`green@0.5` → 50%).
 
@@ -178,6 +194,78 @@ fade_time: 20           # ... then fade out slowly over 20 seconds
 
 Or combine it with a day schedule: the schedule is the "idle" look, printing
 overrides it, and when the print finishes the light fades back to the schedule.
+
+---
+
+## ✨ LED Effects (klipper-led_effect)
+
+Animations are **not** rendered by Auto Light — that's the job of
+[klipper-led_effect](https://github.com/julianschill/klipper-led_effect).
+Auto Light only decides *which* effect should run *when*, and sends a single
+`SET_LED_EFFECT` command when that changes. So it adds no load of its own.
+
+1. Install led_effect and define your effects as usual, e.g.
+   ```ini
+   [led_effect sb_printing]
+   leds: neopixel:sb_leds
+   frame_rate: 12
+   layers: breathing 3 1 top (0.0, 0.3, 1.0)
+   ```
+2. Use them anywhere a value is accepted, with `effect:<name>`:
+   ```ini
+   [auto_light sb]
+   lights: sb_leds                 # used for the plain colours below
+   default: warm@0.2               # idle: static colour
+   schedule_1: 23:00-07:00=off Night
+   printing: effect:sb_printing    # animation while printing
+   complete: effect:sb_rainbow     # celebrate ...
+   error: effect:sb_error
+   finish_hold: 120                # ... for 2 minutes, then back to warm@0.2
+   fade_time: 1
+   ```
+
+How switching works:
+- **Effect → effect:** crossfade (`REPLACE=1 FADETIME=fade_time`), the old one is stopped.
+- **Effect → colour:** the effect fades out, then Auto Light fades the colour in.
+- **Colour → effect:** the effect takes over the LEDs it is defined for.
+- A group may consist of effects only — then `lights:` can be left out and `off` simply stops the effect.
+- Unknown effect names are reported as a config error on startup.
+
+> 💡 **Keep it light while printing:** animations are drawn by the Pi and sent to the
+> MCU many times per second. Prefer a low `frame_rate` (10–15) and calm effects for
+> `printing:`, and save the fancy ones for `complete:` or idle times.
+
+---
+
+## 🖱️ Control from Mainsail / Fluidd
+
+### Control panel (Mainsail)
+Run `AUTO_LIGHT_MENU` (or click **AUTOLIGHT_PANEL**, see below) and a dialog opens:
+
+- Current state of every group (colour/effect, active schedule, manual or paused)
+- **Auto / On / Dim / Off** buttons per group
+- A button for every effect used in that group, to try them out
+- **Pause / Resume automation**
+
+Requires Mainsail v2.9 or newer (macro prompts). Other interfaces simply show the
+text in the console.
+
+### Macro buttons (Mainsail and Fluidd)
+With `[include auto_light_macros.cfg]` you get these buttons in the Macros panel:
+
+| Button | What it does |
+|---|---|
+| `AUTOLIGHT_PANEL` | Opens the control panel |
+| `AUTOLIGHT_AUTO` | Back to automatic |
+| `AUTOLIGHT_ON` | On until the next automatic change (`VALUE=` optional: `warm@0.5`, `effect:rainbow`…) |
+| `AUTOLIGHT_OFF` | Off until the next automatic change |
+
+All accept an optional `LIGHT=<group>`.
+
+### Colour pickers and sliders
+Mainsail/Fluidd already show sliders for `[output_pin]` and colour pickers for
+neopixels. Auto Light respects what you set there **until the next schedule or
+print change**, then takes over again — or click `AUTOLIGHT_AUTO` to return immediately.
 
 ---
 
@@ -222,7 +310,8 @@ A plain `[auto_light]` (no name) is addressed as `LIGHT=default`.
 | `SET_AUTO_LIGHT [LIGHT=]` | Re-apply the value for the current time/print state now |
 | `AUTO_LIGHT_ENABLE [LIGHT=]` | Enable automatic control (saved across restarts) |
 | `AUTO_LIGHT_DISABLE [LIGHT=]` | Disable automatic control (saved across restarts) |
-| `AUTO_LIGHT_SET VALUE= [LIGHT=]` | Temporarily set a value/colour (e.g. `VALUE=warm@0.5`) until the next change — handy to try colours |
+| `AUTO_LIGHT_SET VALUE= [LIGHT=]` | Temporarily set a value, colour or effect (e.g. `VALUE=warm@0.5`, `VALUE=effect:rainbow`) until the next change |
+| `AUTO_LIGHT_MENU [LIGHT=]` | Open the control panel dialog (Mainsail) |
 | `AUTO_LIGHT_LIST_SCHEDULES [LIGHT=]` | Show lights, schedules, print values and status |
 | `AUTO_LIGHT_SCHEDULE_ENABLE ID= [LIGHT=]` | Enable schedule ID (saved) |
 | `AUTO_LIGHT_SCHEDULE_DISABLE ID= [LIGHT=]` | Disable schedule ID (saved) |
@@ -235,14 +324,6 @@ SET_AUTO_LIGHT                              # Back to the automatic value
 AUTO_LIGHT_DISABLE LIGHT=nozzle             # Turn off automation for one group
 ```
 
-### A button for Mainsail / Fluidd
-```ini
-[gcode_macro LIGHTS_AUTO]
-description: Return all lights to automatic mode
-gcode:
-    SET_AUTO_LIGHT
-```
-
 ---
 
 ## 🏠 Status for Mainsail, Fluidd and Home Assistant
@@ -251,8 +332,8 @@ Each group exposes its status through Moonraker as the printer object
 `auto_light` (or `auto_light <name>`):
 
 ```
-enabled, light, mode (schedule / default / printing / paused / complete / error / cancelled),
-current_brightness, current_color, target_brightness, target_color,
+enabled, light, mode (schedule / default / manual / printing / paused / complete / error / cancelled),
+effect, current_brightness, current_color, target_brightness, target_color,
 active_schedule_id, active_schedule_name, current_time, lights, schedules[]
 ```
 
@@ -271,6 +352,7 @@ to show which mode the lights are in.
 3. If print values are configured it also reads Klipper's print state every 2 s
    (a simple in-memory lookup, no G-code involved).
 4. Changes are faded in small steps; each step is sent as a single batched command.
+   Effects are only started/stopped — led_effect does the animating.
 5. Your manual changes (`SET_PIN`, `SET_LED`, UI sliders) are **kept until the
    next schedule or print change** — use `SET_AUTO_LIGHT` to return to automatic.
 6. `AUTO_LIGHT_ENABLE/DISABLE` and disabled schedules are saved to `state_file`.
@@ -290,6 +372,8 @@ to show which mode the lights are in.
 | `light '...' not found` | Use the name after the section type, e.g. `[neopixel sb_leds]` → `sb_leds` |
 | Brightness is only on/off | Your `[output_pin]` needs `pwm: True` |
 | Colours look wrong | Check `color_order` in your `[neopixel]` section |
+| `effect '...' not found` | Install klipper-led_effect and define `[led_effect <name>]` with exactly that name |
+| No dialog appears | The control panel needs Mainsail v2.9+; use the `AUTOLIGHT_*` buttons otherwise |
 | Hex colour ignored | Don't write `#` before the hex value |
 | Something else | Search `klippy.log` for `AutoLight` and open an [issue](https://github.com/Niiikoc/Klipper_Auto_Light/issues) with that part of the log |
 
@@ -306,11 +390,12 @@ rm -f auto_light.py
 **If you installed via the Update Manager (git clone):**
 ```bash
 rm -f ~/klipper/klippy/extras/auto_light.py   # remove the symlink
+rm -f ~/printer_data/config/auto_light_macros.cfg
 rm -rf ~/Klipper_Auto_Light                    # remove the cloned repo
 ```
 Then remove the `[update_manager auto_light]` block from your `moonraker.conf` and restart Moonraker.
 
-**In both cases:** remove the `[auto_light]` section from your `printer.cfg`, delete the leftover `auto_light_state.json` from your config folder if present, and restart Klipper.
+**In both cases:** remove the `[auto_light]` section(s) and any `[include auto_light_macros.cfg]` from your `printer.cfg`, delete the leftover `auto_light_state.json` from your config folder if present, and restart Klipper.
 
 ---
 
@@ -334,6 +419,8 @@ Feel free to check the [issues page](https://github.com/Niiikoc/Klipper_Auto_Lig
 - 🧩 Several lights per group (`lights:`), LED index ranges (`sb_leds:2-3`) and independent `[auto_light name]` groups
 - 🖨️ Print-aware values: `printing`, `paused`, `complete`, `error`, `cancelled`, `finish_hold`
 - 🌅 Smooth fades (`fade_time`)
+- ✨ klipper-led_effect integration: `effect:<name>` values with crossfades
+- 🖱️ `AUTO_LIGHT_MENU` control panel (Mainsail) and `auto_light_macros.cfg` buttons
 - ⏱️ Changes happen exactly at schedule boundaries instead of every `check_interval`
 - ✋ Manual light changes are no longer overwritten until the next scheduled change
 - 💾 Disabled schedules are now saved across restarts too

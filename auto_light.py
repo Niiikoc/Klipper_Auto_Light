@@ -1,12 +1,14 @@
 # Klipper Auto Light
 #
 # Time-schedule and print-aware control for case lights, LED strips and
-# neopixels, with smooth fades and colours.
+# neopixels, with smooth fades, colours and optional led_effect animations.
 #
 # Design goals: never get in Klipper's way. The module does no work between
 # events - it sleeps until the next schedule boundary, only polls the print
 # state (a cheap dict lookup every few seconds) when print rules are
 # configured, and sends each fade step as one batched G-code script.
+# Animations are never rendered here: they are delegated to the
+# klipper-led_effect extension, which Auto Light only starts and stops.
 #
 # Licensed under the MIT License.
 
@@ -36,6 +38,34 @@ NAMED_COLORS = {
     'cyan': (0., 1., 1., 0.),
 }
 _HEX = set('0123456789abcdef')
+OFF = (0., 0., 0., 0.)
+
+
+class EffectValue:
+    """A value that runs a [led_effect NAME] instead of a static colour."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return isinstance(other, EffectValue) and other.name == self.name
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return hash(('effect', self.name))
+
+
+def is_effect(value):
+    return isinstance(value, EffectValue)
+
+
+def level(value):
+    """Brightness 0.0-1.0 of a colour value, None for effects / no value."""
+    if value is None or is_effect(value):
+        return None
+    return max(value)
 
 
 def parse_value(text, base_color=(1., 1., 1., 0.)):
@@ -47,8 +77,15 @@ def parse_value(text, base_color=(1., 1., 1., 0.)):
       FF8800         RRGGBB hex colour (no '#', Klipper treats it as comment)
       FF880080       RRGGBBWW hex colour (RGBW strips)
       warm@0.4       any colour scaled to a brightness
+      effect:name    start [led_effect name] (klipper-led_effect)
     """
-    text = text.strip().lower()
+    text = text.strip()
+    if text.lower().startswith('effect:'):
+        name = text[7:].strip()
+        if not name or ' ' in name:
+            raise ValueError("invalid effect name '%s'" % name)
+        return EffectValue(name)
+    text = text.lower()
     brightness = None
     if '@' in text:
         text, b = text.split('@', 1)
@@ -76,6 +113,8 @@ def describe(color):
     """Short human description of a colour tuple."""
     if color is None:
         return "none"
+    if is_effect(color):
+        return "effect %s" % color.name
     level = max(color)
     if level <= 0.:
         return "off"
@@ -124,6 +163,7 @@ class LightTarget:
         self.kind = None
         self.is_pwm = True
         self.last_script = None
+        self.current = None         # colour last sent to this light
 
     def resolve(self, printer, error):
         pin = printer.lookup_object('output_pin ' + self.name, None)
@@ -187,10 +227,12 @@ class AutoLightManager:
 
     def __init__(self, printer):
         self.lights = {}
-        gcode = printer.lookup_object('gcode')
+        self.printer = printer
+        self.gcode = gcode = printer.lookup_object('gcode')
         for cmd in ('SET_AUTO_LIGHT', 'AUTO_LIGHT_ENABLE', 'AUTO_LIGHT_DISABLE',
                     'AUTO_LIGHT_SET', 'AUTO_LIGHT_SCHEDULE_ENABLE',
-                    'AUTO_LIGHT_SCHEDULE_DISABLE', 'AUTO_LIGHT_LIST_SCHEDULES'):
+                    'AUTO_LIGHT_SCHEDULE_DISABLE', 'AUTO_LIGHT_LIST_SCHEDULES',
+                    'AUTO_LIGHT_MENU'):
             gcode.register_command(cmd, getattr(self, 'cmd_' + cmd),
                                    desc=getattr(self, 'cmd_%s_help' % cmd))
 
@@ -239,12 +281,8 @@ class AutoLightManager:
         text = gcmd.get('VALUE')
         lights = self._select(gcmd)
         for light in lights:
-            try:
-                color = parse_value(text, light.base_color)
-            except ValueError as e:
-                raise gcmd.error("AutoLight: invalid VALUE '%s': %s"
-                                 % (text, e))
-            light.start_fade(color)
+            color = light.parse_command_value(gcmd, text)
+            light.set_manual(color)
             gcmd.respond_info("AutoLight [%s]: set to %s until the next "
                               "change" % (light.light_name, describe(color)))
 
@@ -267,6 +305,91 @@ class AutoLightManager:
         for light in self._select(gcmd):
             gcmd.respond_info(light.report())
 
+    # ----- Mainsail / Fluidd dialog ---------------------------------------
+
+    cmd_AUTO_LIGHT_MENU_help = "Open the Auto Light control panel (Mainsail)"
+
+    def cmd_AUTO_LIGHT_MENU(self, gcmd):
+        action = gcmd.get('ACTION', 'show').lower()
+        if action == 'close':
+            self._prompt(["prompt_end"])
+            return
+        name = gcmd.get('LIGHT', None)
+        lights = self._select(gcmd)
+        if action == 'auto':
+            for light in lights:
+                light.resume_auto()
+        elif action == 'set':
+            for light in lights:
+                light.set_manual(light.parse_command_value(
+                    gcmd, gcmd.get('VALUE')))
+        elif action in ('enable', 'disable'):
+            for light in lights:
+                light.set_enabled(action == 'enable')
+        elif action != 'show':
+            raise gcmd.error("AutoLight: unknown ACTION '%s'" % action)
+        if name is None and len(self.lights) > 1:
+            self._show_overview()
+        else:
+            self._show_light(lights[0], back=len(self.lights) > 1)
+
+    def _prompt(self, lines):
+        for line in lines:
+            self.gcode.respond_raw("// action:" + line)
+
+    def _show_overview(self):
+        lines = ["prompt_begin Auto Light"]
+        for light in sorted(self.lights.values(), key=lambda l: l.light_name):
+            lines.append("prompt_text %s: %s" % (light.light_name,
+                                                 light.summary()))
+        lines.append("prompt_button_group_start")
+        for name in sorted(self.lights):
+            lines.append("prompt_button %s|AUTO_LIGHT_MENU LIGHT=%s|info"
+                         % (name, name))
+        lines += ["prompt_button_group_end",
+                  "prompt_button_group_start",
+                  "prompt_button All auto|AUTO_LIGHT_MENU ACTION=auto|primary",
+                  "prompt_button All off|AUTO_LIGHT_MENU ACTION=set "
+                  "VALUE=off|secondary",
+                  "prompt_button_group_end",
+                  "prompt_footer_button Close|AUTO_LIGHT_MENU ACTION=close",
+                  "prompt_show"]
+        self._prompt(lines)
+
+    def _show_light(self, light, back):
+        cmd = "AUTO_LIGHT_MENU LIGHT=%s" % light.light_name
+        lines = ["prompt_begin Auto Light: %s" % light.light_name,
+                 "prompt_text %s" % light.summary(),
+                 "prompt_button_group_start",
+                 "prompt_button Auto|%s ACTION=auto|primary" % cmd]
+        if light.targets:
+            lines += ["prompt_button On|%s ACTION=set VALUE=1.0|secondary"
+                      % cmd,
+                      "prompt_button Dim|%s ACTION=set VALUE=0.3|secondary"
+                      % cmd]
+        lines += ["prompt_button Off|%s ACTION=set VALUE=off|secondary" % cmd,
+                  "prompt_button_group_end"]
+        effects = light.known_effects()
+        if effects:
+            lines.append("prompt_text Effects:")
+            for i in range(0, len(effects), 3):
+                lines.append("prompt_button_group_start")
+                for eff in effects[i:i + 3]:
+                    lines.append("prompt_button %s|%s ACTION=set "
+                                 "VALUE=effect:%s|info" % (eff, cmd, eff))
+                lines.append("prompt_button_group_end")
+        if light.enabled:
+            lines.append("prompt_footer_button Pause automation|%s "
+                         "ACTION=disable|warning" % cmd)
+        else:
+            lines.append("prompt_footer_button Resume automation|%s "
+                         "ACTION=enable|primary" % cmd)
+        if back:
+            lines.append("prompt_footer_button Back|AUTO_LIGHT_MENU")
+        lines += ["prompt_footer_button Close|AUTO_LIGHT_MENU ACTION=close",
+                  "prompt_show"]
+        self._prompt(lines)
+
 
 class AutoLight:
     def __init__(self, config):
@@ -276,15 +399,6 @@ class AutoLight:
         self.section = config.get_name()
         parts = self.section.split(None, 1)
         self.light_name = parts[1] if len(parts) > 1 else 'default'
-
-        # --- lights -------------------------------------------------------
-        lights = config.get('lights', None)
-        pin = config.get('pin', None)            # v1/v2 option, still works
-        spec = lights if lights is not None else (pin or 'case_light')
-        self.targets = [LightTarget(s, config.error)
-                        for s in spec.split(',') if s.strip()]
-        if not self.targets:
-            raise config.error("AutoLight: 'lights' is empty")
 
         # --- timing -------------------------------------------------------
         self.check_interval = config.getfloat('check_interval', 600.,
@@ -296,10 +410,13 @@ class AutoLight:
         # --- values -------------------------------------------------------
         self.base_color = self._parse_opt(config, 'color', 'white',
                                           (1., 1., 1., 0.))
-        self.default_value = self._parse_opt(config, 'default', None)
+        if is_effect(self.base_color):
+            raise config.error("AutoLight: 'color' must be a colour")
+        self.default_value = self._parse_opt(config, 'default', None,
+                                             base=self.base_color)
         self.print_values = {}
         for state in PRINT_STATES:
-            value = self._parse_opt(config, state, None)
+            value = self._parse_opt(config, state, None, base=self.base_color)
             if value is not None:
                 self.print_values[state] = value
         self.print_aware = bool(self.print_values)
@@ -327,6 +444,18 @@ class AutoLight:
         self.schedules.sort(key=lambda s: s.start)
         self._warn_coverage()
 
+        # --- lights -------------------------------------------------------
+        # A group that only uses effects (and 'off') needs no lights of its
+        # own; otherwise fall back to the v1/v2 default pin name.
+        lights = config.get('lights', None)
+        pin = config.get('pin', None)            # v1/v2 option, still works
+        spec = lights if lights is not None else pin
+        if spec is None and any(not is_effect(v) and max(v) > 0.
+                                for v in self._all_values()):
+            spec = 'case_light'
+        self.targets = [LightTarget(s, config.error)
+                        for s in (spec or '').split(',') if s.strip()]
+
         state_file = config.get('state_file', None)
         self.state_file = os.path.expanduser(
             state_file or self._default_state_file())
@@ -335,14 +464,18 @@ class AutoLight:
         self.print_stats = None
         self.print_state = None
         self.print_state_since = 0.
-        self.mode = None
+        self.mode = None            # what the automation selected
+        self.manual = None          # value set by hand, until next change
         self.active_schedule = None
         self.target = None          # value the automation wants
-        self.current = None         # value last sent to the lights
+        self.current = None         # last colour sent (None during effects)
+        self.active_effect = None   # name of the effect we started
         self.force = False
         self.update_timer = None
-        self.fade_timer = None
+        self.output_timer = None
+        self.pending = []           # scripts to send before the next fade
         self.fade = None
+        self.generation = 0
         self.sending = False
 
         manager = self.printer.lookup_object('auto_light_manager', None)
@@ -363,15 +496,30 @@ class AutoLight:
     # ===== setup ==========================================================
 
     @staticmethod
-    def _parse_opt(config, option, default, fallback=None):
+    def _parse_opt(config, option, default, fallback=None,
+                   base=(1., 1., 1., 0.)):
         raw = config.get(option, default)
         if raw is None:
             return fallback
         try:
-            return parse_value(raw)
+            return parse_value(raw, base)
         except ValueError as e:
             raise config.error("AutoLight: invalid %s '%s': %s"
                                % (option, raw, e))
+
+    def _all_values(self):
+        values = [s.color for s in self.schedules]
+        values += list(self.print_values.values())
+        if self.default_value is not None:
+            values.append(self.default_value)
+        return values
+
+    def known_effects(self):
+        names = []
+        for value in self._all_values():
+            if is_effect(value) and value.name not in names:
+                names.append(value.name)
+        return names
 
     def _warn_coverage(self):
         if not self.schedules:
@@ -404,23 +552,34 @@ class AutoLight:
             pass
         return os.path.expanduser('~/auto_light_state.json')
 
+    def _effect_exists(self, name):
+        return self.printer.lookup_object('led_effect ' + name,
+                                          None) is not None
+
     def _handle_connect(self):
-        # Raised errors here are reported to the user as config errors
+        # Errors raised here are reported to the user as config errors
+        error = self.printer.config_error
         for target in self.targets:
-            target.resolve(self.printer, self.printer.config_error)
+            target.resolve(self.printer, error)
+        for name in self.known_effects():
+            if not self._effect_exists(name):
+                raise error("AutoLight [%s]: effect '%s' not found. Define "
+                            "[led_effect %s] (requires klipper-led_effect)"
+                            % (self.light_name, name, name))
         if self.print_aware:
             self.print_stats = self.printer.lookup_object('print_stats', None)
 
     def _handle_ready(self):
         self._load_state()
         self.update_timer = self.reactor.register_timer(self._update_cb)
-        self.fade_timer = self.reactor.register_timer(self._fade_cb)
+        self.output_timer = self.reactor.register_timer(self._output_cb)
         if self.enabled:
             self.request_update(force=True)
 
     def _handle_shutdown(self):
         self.enabled = False
         self.fade = None
+        self.pending = []
 
     # ===== persistence ====================================================
 
@@ -524,7 +683,8 @@ class AutoLight:
             self.active_schedule = sched
             if value is not None and (changed or self.force):
                 self.target = value
-                self.start_fade(value)
+                self.manual = None
+                self.apply(value)
                 if changed:
                     label = sched.name if sched is not None else mode
                     self.gcode.respond_info("AutoLight [%s]: %s -> %s"
@@ -540,44 +700,96 @@ class AutoLight:
         return eventtime + wait
 
     # ===== output =========================================================
+    #
+    # All G-code is sent from the output timer, never from inside a G-code
+    # command, so commands can safely request changes at any time.
 
-    def start_fade(self, color):
-        start = self.current
-        can_fade = any(t.can_fade for t in self.targets)
-        if start is None or self.fade_time <= 0. or not can_fade:
-            steps = 1
+    def apply(self, value):
+        """Show a colour (with fade) or start an effect."""
+        self.generation += 1
+        fade = self.fade_time
+        if is_effect(value):
+            self.fade = None
+            if value.name != self.active_effect:
+                self.pending.append("SET_LED_EFFECT EFFECT=%s REPLACE=1 "
+                                    "FADETIME=%.2f" % (value.name, fade))
+                if self.active_effect:
+                    self.pending.append("SET_LED_EFFECT EFFECT=%s STOP=1 "
+                                        "FADETIME=%.2f"
+                                        % (self.active_effect, fade))
+                self.active_effect = value.name
+                self.current = None
+                for target in self.targets:
+                    if target.kind == 'led':
+                        target.current = None   # the effect owns these now
+                        target.last_script = None
         else:
-            steps = max(1, int(round(self.fade_time / FADE_STEP)))
-        self.fade = {'from': start or color, 'to': color,
-                     'steps': steps, 'step': 0}
-        # A fade callback that is busy sending will pick up the new fade by
-        # itself; re-arming the timer then could run the callback twice.
-        if self.fade_timer is not None and not self.sending:
-            self.reactor.update_timer(self.fade_timer, self.reactor.NOW)
+            start_at = 0.
+            if self.active_effect:
+                self.pending.append("SET_LED_EFFECT EFFECT=%s STOP=1 "
+                                    "FADETIME=%.2f" % (self.active_effect, fade))
+                self.active_effect = None
+                # led_effect fades out and finally writes black, so only
+                # start our own colour once it is done.
+                start_at = self.reactor.monotonic() + fade + 0.3
+                for target in self.targets:
+                    if target.kind == 'led':
+                        target.current = OFF
+                        target.last_script = None
+            if self.targets:
+                steps = 1
+                if self.fade_time > 0. and all(
+                        t.current is not None for t in self.targets) and any(
+                        t.can_fade for t in self.targets):
+                    steps = max(1, int(round(self.fade_time / FADE_STEP)))
+                self.fade = {
+                    'from': [t.current or value for t in self.targets],
+                    'to': value, 'steps': steps, 'step': 0,
+                    'start_at': start_at,
+                }
+            else:
+                self.fade = None
+                self.current = value
+        self._kick_output()
 
-    def _fade_cb(self, eventtime):
+    def _kick_output(self):
+        # A callback that is busy sending notices the new generation by
+        # itself; re-arming the timer then could run it twice at once.
+        if self.output_timer is not None and not self.sending:
+            self.reactor.update_timer(self.output_timer, self.reactor.NOW)
+
+    def _output_cb(self, eventtime):
+        generation = self.generation
+        if self.pending:
+            scripts, self.pending = self.pending, []
+            self._run(scripts)
+            if self.generation != generation:
+                return self.reactor.NOW
         fade = self.fade
         if fade is None:
             return self.reactor.NEVER
+        if eventtime < fade['start_at']:
+            return fade['start_at']
         fade['step'] += 1
         t = float(fade['step']) / fade['steps']
-        color = tuple(a + (b - a) * t for a, b in zip(fade['from'], fade['to']))
-        self._send(color)
-        if self.fade is not fade:          # a new fade started while sending
+        scripts = []
+        for target, start in zip(self.targets, fade['from']):
+            color = tuple(a + (b - a) * t for a, b in zip(start, fade['to']))
+            target.current = color
+            script = target.script(color)
+            if script != target.last_script:
+                scripts.append(script)
+                target.last_script = script
+        self.current = tuple(self.targets[0].current)
+        self._run(scripts)
+        if self.generation != generation:
             return self.reactor.NOW
         if fade['step'] >= fade['steps']:
             self.fade = None
             return self.reactor.NEVER
         return eventtime + FADE_STEP
 
-    def _send(self, color):
-        scripts = []
-        for target in self.targets:
-            script = target.script(color)
-            if script != target.last_script:
-                scripts.append(script)
-                target.last_script = script
-        self.current = color
+    def _run(self, scripts):
         if not scripts:
             return
         self.sending = True
@@ -593,6 +805,28 @@ class AutoLight:
 
     # ===== command helpers ================================================
 
+    def parse_command_value(self, gcmd, text):
+        try:
+            value = parse_value(text, self.base_color)
+        except ValueError as e:
+            raise gcmd.error("AutoLight: invalid VALUE '%s': %s" % (text, e))
+        if is_effect(value) and not self._effect_exists(value.name):
+            raise gcmd.error("AutoLight: effect '%s' not found" % value.name)
+        if not is_effect(value) and max(value) > 0. and not self.targets:
+            raise gcmd.error("AutoLight [%s]: this group has no 'lights', "
+                             "only effects or off" % self.light_name)
+        return value
+
+    def set_manual(self, value):
+        self.manual = value
+        self.apply(value)
+
+    def resume_auto(self):
+        if not self.enabled:
+            self.set_enabled(True)
+        else:
+            self.request_update(force=True)
+
     def request_update(self, force=False):
         if force:
             self.force = True
@@ -602,7 +836,6 @@ class AutoLight:
     def set_enabled(self, enabled):
         self.enabled = enabled
         if not enabled:
-            self.fade = None
             self.mode = None
             if self.update_timer is not None:
                 self.reactor.update_timer(self.update_timer,
@@ -632,12 +865,33 @@ class AutoLight:
                              "enabled" if enabled else "disabled", sched.name))
         self.request_update()
 
+    def _shown(self):
+        if self.active_effect:
+            return EffectValue(self.active_effect)
+        if self.fade is not None:
+            return self.fade['to']
+        return self.current
+
+    def summary(self):
+        if not self.enabled:
+            state = "automation paused"
+        elif self.manual is not None:
+            state = "manual until next change"
+        elif self.active_schedule is not None:
+            state = "%s (%s)" % (self.active_schedule.name,
+                                 self.active_schedule.span())
+        else:
+            state = self.mode or "-"
+        return "%s, %s" % (describe(self._shown()), state)
+
     def report(self):
         lines = ["AutoLight [%s]: %s, mode: %s, now: %s"
                  % (self.light_name,
                     "ENABLED" if self.enabled else "DISABLED",
-                    self.mode or "-", describe(self.current)),
-                 "  lights: " + ", ".join(t.spec for t in self.targets)]
+                    "manual" if self.manual is not None else self.mode or "-",
+                    describe(self._shown())),
+                 "  lights: " + (", ".join(t.spec for t in self.targets)
+                                 or "(effects only)")]
         for s in self.schedules:
             lines.append("  %d. %s [%s]: %s = %s"
                          % (s.id, s.name, "ENABLED" if s.enabled
@@ -655,14 +909,17 @@ class AutoLight:
     def get_status(self, eventtime):
         now = datetime.datetime.now()
         sched = self.active_schedule
+        current = None if self.active_effect else self.current
+        target = None if is_effect(self.target) else self.target
         return {
             'enabled': self.enabled,
             'light': self.light_name,
-            'mode': self.mode,
-            'current_brightness': max(self.current) if self.current else None,
-            'current_color': list(self.current) if self.current else None,
-            'target_brightness': max(self.target) if self.target else None,
-            'target_color': list(self.target) if self.target else None,
+            'mode': 'manual' if self.manual is not None else self.mode,
+            'effect': self.active_effect,
+            'current_brightness': level(current),
+            'current_color': list(current) if current else None,
+            'target_brightness': level(target),
+            'target_color': list(target) if target else None,
             'active_schedule_id': sched.id if sched else None,
             'active_schedule_name': sched.name if sched else None,
             'current_time': "%02d:%02d" % (now.hour, now.minute),
@@ -672,8 +929,9 @@ class AutoLight:
                 'name': s.name,
                 'start': _fmt_min(s.start),
                 'end': _fmt_min(s.end),
-                'brightness': max(s.color),
-                'color': list(s.color),
+                'brightness': level(s.color),
+                'color': None if is_effect(s.color) else list(s.color),
+                'effect': s.color.name if is_effect(s.color) else None,
                 'enabled': s.enabled,
             } for s in self.schedules],
         }
