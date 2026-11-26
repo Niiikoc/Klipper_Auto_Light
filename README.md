@@ -19,8 +19,9 @@ also switch animations for you — without you writing a single macro.
 - ✨ **Animations via [klipper-led_effect](https://github.com/julianschill/klipper-led_effect)** — rainbow, breathing, comet… picked automatically by time or print state
 - 🖱️ **Control panel in Mainsail** plus ready-made macro buttons for Mainsail / Fluidd
 - 🎛️ Independent light groups with `[auto_light name]` sections — combine them however you like
-- ✋ Manual changes are respected until the next schedule or print change
-- 💾 Enabled/disabled state (and disabled schedules) survive restarts
+- 🔀 **Two switches per group**: *Schedule* (time of day) and *Print* (print state), each can be turned off on its own
+- ✋ Manual values stay until you return to automatic or a print starts
+- 💾 Switches and disabled schedules survive restarts (and are announced in the console)
 - 🪶 Lightweight: sleeps until the next change, no busy loops
 
 ---
@@ -127,8 +128,8 @@ Klipper for you.
 lights: caselight          # One or more lights, comma separated (see below)
 #color: white              # Base colour that plain brightness values use (LEDs only)
 #fade_time: 1.0            # Seconds to fade between values (0 = instant)
-#enabled: True             # Default on the very first startup (afterwards the
-                           # saved AUTO_LIGHT_ENABLE/DISABLE choice is used)
+#enabled: True             # Start position of the Schedule and Print switches
+                           # (see "How It Works" below)
 #check_interval: 600       # Safety re-check in seconds (time changes, NTP sync)
 #state_file: ~/printer_data/config/auto_light_state.json
 
@@ -137,7 +138,7 @@ lights: caselight          # One or more lights, comma separated (see below)
 schedule_1: 07:00-19:00=1.0 Day
 schedule_2: 19:00-07:00=warm@0.2 Night
 
-#default: off              # Used when no schedule matches (or instead of schedules)
+#idle: off                 # Used when no schedule matches (or instead of schedules)
 
 # Print-aware values (all optional — anything not set falls back to the schedule)
 #printing: white           # While a print is running
@@ -145,8 +146,11 @@ schedule_2: 19:00-07:00=warm@0.2 Night
 #complete: green@0.5       # After a successful print ...
 #error: red                # ... after an error ...
 #cancelled: off            # ... after a cancelled print ...
-#finish_hold: 300          # ... for this many seconds, then back to the schedule
+#show_result_for: 300      # ... for this many seconds, then back to the schedule
 ```
+
+> Renamed options: `default:` → `idle:`, `finish_hold:` → `show_result_for:`.
+> The old names keep working.
 
 ### Light names
 `lights:` takes the names of your existing Klipper sections — Auto Light finds out
@@ -185,10 +189,10 @@ Light up the printer only when it matters — great for cameras and timelapses:
 ```ini
 [auto_light]
 lights: caselight
-default: off            # Idle: off
+idle: off               # Not printing: off
 printing: 1.0           # Printing: full brightness
 complete: 1.0           # Keep it on after the print so you can look at it ...
-finish_hold: 600        # ... for 10 minutes ...
+show_result_for: 600    # ... for 10 minutes ...
 fade_time: 20           # ... then fade out slowly over 20 seconds
 ```
 
@@ -215,12 +219,12 @@ Auto Light only decides *which* effect should run *when*, and sends a single
    ```ini
    [auto_light sb]
    lights: sb_leds                 # used for the plain colours below
-   default: warm@0.2               # idle: static colour
+   idle: warm@0.2                  # not printing: static colour
    schedule_1: 23:00-07:00=off Night
    printing: effect:sb_printing    # animation while printing
    complete: effect:sb_rainbow     # celebrate ...
    error: effect:sb_error
-   finish_hold: 120                # ... for 2 minutes, then back to warm@0.2
+   show_result_for: 120            # ... for 2 minutes, then back to warm@0.2
    fade_time: 1
    ```
 
@@ -242,10 +246,10 @@ How switching works:
 ### Control panel (Mainsail)
 Run `AUTO_LIGHT_MENU` (or click **AUTOLIGHT_PANEL**, see below) and a dialog opens:
 
-- Current state of every group (colour/effect, active schedule, manual or paused)
+- Current state of every group: both switches, what the light shows and why
 - **Auto / On / Dim / Off** buttons per group
-- A button for every effect used in that group, to try them out (plays for `finish_hold` seconds)
-- **Pause / Resume automation**
+- A button for every effect used in that group, to try them out (plays for `show_result_for` seconds)
+- **Schedule: ON/OFF** and **Print: ON/OFF** toggle buttons
 
 Requires Mainsail v2.9 or newer (macro prompts). Other interfaces simply show the
 text in the console.
@@ -256,9 +260,10 @@ With `[include auto_light_macros.cfg]` you get these buttons in the Macros panel
 | Button | What it does |
 |---|---|
 | `AUTOLIGHT_PANEL` | Opens the control panel |
-| `AUTOLIGHT_AUTO` | Back to automatic |
-| `AUTOLIGHT_ON` | On until the next automatic change (`VALUE=` optional: `warm@0.5`, `effect:rainbow`…; `DURATION=` seconds optional) |
-| `AUTOLIGHT_OFF` | Off until the next automatic change |
+| `AUTOLIGHT_AUTO` | End manual values, back to automatic now |
+| `AUTOLIGHT_ON` | On until `AUTOLIGHT_AUTO` or the next print (`VALUE=` optional: `warm@0.5`, `effect:rainbow`…; `DURATION=` seconds optional) |
+| `AUTOLIGHT_OFF` | Off until `AUTOLIGHT_AUTO` or the next print |
+| `AUTOLIGHT_ENABLE` / `AUTOLIGHT_DISABLE` | Turn the switches on/off (`PART=schedule` or `PART=print` optional) |
 
 All accept an optional `LIGHT=<group>`.
 
@@ -266,6 +271,7 @@ All accept an optional `LIGHT=<group>`.
 Mainsail/Fluidd already show sliders for `[output_pin]` and colour pickers for
 neopixels. Auto Light respects what you set there **until the next schedule or
 print change**, then takes over again — or click `AUTOLIGHT_AUTO` to return immediately.
+(Values set with `AUTO_LIGHT_SET` / `AUTOLIGHT_ON` last longer, see below.)
 
 ---
 
@@ -283,15 +289,15 @@ printing: 1.0
 
 [auto_light logo]                 # Logo LED: calm colour, status colours on print
 lights: sb_leds:1
-default: purple@0.3
+idle: purple@0.3
 printing: blue
 complete: green
 error: red
-finish_hold: 900
+show_result_for: 900
 
 [auto_light nozzle]               # Nozzle LEDs: only on while printing
 lights: sb_leds:2-3
-default: off
+idle: off
 printing: FFFFFFFF                # RGBW full white
 fade_time: 3
 ```
@@ -307,30 +313,36 @@ A plain `[auto_light]` (no name) is addressed as `LIGHT=default`.
 
 | Command | Description |
 |---------|-------------|
-| `SET_AUTO_LIGHT [LIGHT=]` | Re-apply the value for the current time/print state now |
-| `AUTO_LIGHT_ENABLE [LIGHT=]` | Enable automatic control (saved across restarts) |
-| `AUTO_LIGHT_DISABLE [LIGHT=]` | Disable automatic control (saved across restarts) |
-| `AUTO_LIGHT_SET VALUE= [LIGHT=] [DURATION=]` | Temporarily set a value, colour or effect (e.g. `VALUE=warm@0.5`, `VALUE=effect:rainbow`) — see below |
+| `AUTO_LIGHT_RESUME [LIGHT=]` | End manual values and show the automatic value now. If there is nothing automatic to show, it says why (old name: `SET_AUTO_LIGHT`) |
+| `AUTO_LIGHT_ENABLE [PART=] [LIGHT=]` | Turn a switch on: `PART=schedule`, `PART=print`, or both without `PART` (saved) |
+| `AUTO_LIGHT_DISABLE [PART=] [LIGHT=]` | Turn a switch off, same `PART` options (saved) |
+| `AUTO_LIGHT_SET VALUE= [LIGHT=] [DURATION=]` | Set a value, colour or effect by hand (e.g. `VALUE=warm@0.5`, `VALUE=effect:rainbow`), see below |
 | `AUTO_LIGHT_MENU [LIGHT=]` | Open the control panel dialog (Mainsail) |
-| `AUTO_LIGHT_LIST_SCHEDULES [LIGHT=]` | Show lights, schedules, print values and status |
+| `AUTO_LIGHT_LIST_SCHEDULES [LIGHT=]` | Show switches, current value, schedules and print values |
 | `AUTO_LIGHT_SCHEDULE_ENABLE ID= [LIGHT=]` | Enable schedule ID (saved) |
 | `AUTO_LIGHT_SCHEDULE_DISABLE ID= [LIGHT=]` | Disable schedule ID (saved) |
 
-### How long does `AUTO_LIGHT_SET` last?
+### How long does a manual value last?
+One rule: a value set with `AUTO_LIGHT_SET` (or the **On / Dim / Off** buttons) stays until
+`AUTO_LIGHT_RESUME`, or until a print starts while the Print switch is on.
+Schedule changes don't end it. On top of that:
+
 | Value | Without `DURATION` | With `DURATION=30` | With `DURATION=0` |
 |---|---|---|---|
-| Colour / brightness / `off` | Until the next schedule or print change | 30 s, then automatic | Until the next change |
-| `effect:name` | `finish_hold` seconds (default 300), then automatic | 30 s, then automatic | Until the next change |
+| Colour / brightness / `off` | Until resume or print start | 30 s, then automatic | Until resume or print start |
+| `effect:name` | `show_result_for` seconds (default 300), then automatic | 30 s, then automatic | Until resume or print start |
 
-`SET_AUTO_LIGHT` (or the **Auto** button) always returns to automatic immediately,
-and starting a print ends any manual value.
+The console always says when the value ends, e.g.
+`AutoLight [default]: 40% for 30 s (until 21:14:05), then automatic`.
+If both switches are off, a timed value goes back to what was shown before it.
 
 ### Examples
 ```gcode
 AUTO_LIGHT_SCHEDULE_DISABLE ID=2            # Working late: skip the evening dim
 AUTO_LIGHT_SET VALUE=FF8800@0.5 LIGHT=logo  # Preview a colour
 AUTO_LIGHT_SET VALUE=effect:rainbow DURATION=10  # Try an effect for 10 s
-SET_AUTO_LIGHT                              # Back to the automatic value
+AUTO_LIGHT_RESUME                           # Back to the automatic value
+AUTO_LIGHT_DISABLE PART=schedule            # Lights only react to prints
 AUTO_LIGHT_DISABLE LIGHT=nozzle             # Turn off automation for one group
 ```
 
@@ -342,10 +354,14 @@ Each group exposes its status through Moonraker as the printer object
 `auto_light` (or `auto_light <name>`):
 
 ```
-enabled, light, mode (schedule / default / manual / printing / paused / complete / error / cancelled),
+schedule_enabled, print_enabled, manual, manual_value, manual_remaining,
+mode (schedule / idle / manual / printing / paused / complete / error / cancelled / restored),
 effect, current_brightness, current_color, target_brightness, target_color,
-active_schedule_id, active_schedule_name, current_time, lights, schedules[]
+active_schedule_id, active_schedule_name, current_time, lights, schedules[],
+enabled (true if any switch is on, kept for older setups)
 ```
+`manual_remaining` is the number of seconds left on a timed manual value, and `null`
+when the value lasts until resume.
 
 Use it in macros (`printer["auto_light logo"].mode`) or with the
 [Moonraker Home Assistant integration](https://github.com/marcolivierarsenault/moonraker-home-assistant)
@@ -355,22 +371,63 @@ to show which mode the lights are in.
 
 ## 🧠 How It Works
 
+### Two switches per group
+Every group has two independent switches. Both start in the position of `enabled:`
+(default on).
+
+| Switch | Controls | When it is OFF |
+|---|---|---|
+| **Schedule** | `schedule_N` and `idle` (time of day) | the light no longer changes with the time |
+| **Print** | `printing`, `paused`, `complete`, `error`, `cancelled` | the light ignores prints |
+
+- While a print value applies (printing or paused, then `show_result_for` seconds
+  after the print), it wins over the schedule.
+- If the Schedule switch is off, the light goes back to **what it showed before the
+  print** once the result has been shown.
+- `off` / `0` is just a brightness. It never stops the automation: the next
+  schedule turns the light back on.
+- A group without print values has only the Schedule switch.
+
+Change the switches with `AUTO_LIGHT_ENABLE/DISABLE PART=schedule|print` (without `PART`
+both change), with the **AUTOLIGHT_ENABLE/DISABLE** macros, or with the toggle buttons in the panel.
+
+**Saved across restarts.** The switch positions are saved in `state_file`. On startup, any
+switch that is off is announced in the console, e.g.
+`AutoLight [default]: schedule OFF (saved in auto_light_state.json) - AUTO_LIGHT_ENABLE LIGHT=default to turn on`.
+A saved position wins over `enabled:` **until you change `enabled:` in the config**, and
+then the config wins. A state saved by v2 (`AUTO_LIGHT_DISABLE`) is kept and announced the same way.
+
+### What do I see, and why?
+`AUTO_LIGHT_LIST_SCHEDULES` and the panel show it for each group, e.g.
+`AutoLight [default]: schedule ON | print ON | now: 30% (Evening 19:00-23:00)`.
+
+| Console shows | Why | To change it |
+|---|---|---|
+| `now: 30% (Evening 19:00-23:00)` | The Schedule switch picked a schedule | — |
+| `now: off (idle)` | No schedule matches right now, so `idle:` applies | — |
+| `now: 80% (printing)` / `(complete)` | The Print switch shows a print value | wait, or `AUTO_LIGHT_DISABLE PART=print` |
+| `now: 40% (manual, 25 s left)` / `(manual, until AUTO_LIGHT_RESUME ...)` | You set a value by hand | `AUTO_LIGHT_RESUME` |
+| `now: 30% (as before the print)` | Schedule is off and the print is done, so the earlier look is back | — |
+| `now: 100% (automation off, left as is)` | Both switches are off | `AUTO_LIGHT_ENABLE` |
+| `now: 100% (no rule active, left as is)` | Schedule is off and no print value applies | `AUTO_LIGHT_ENABLE PART=schedule` |
+| `schedule OFF` right after startup | Saved switch position (possibly from v2) | `AUTO_LIGHT_ENABLE` |
+
+### Under the hood
 1. On startup Auto Light applies the right value immediately.
-2. It then **sleeps until the next schedule boundary** — changes happen on the
-   exact minute, not up to 10 minutes late — with a safety re-check every
-   `check_interval` seconds (clock changes, NTP sync on boot).
-3. If print values are configured it also reads Klipper's print state every 2 s
+2. It then **sleeps until the next schedule boundary**, so changes happen on the
+   exact minute, with a safety re-check every `check_interval` seconds
+   (clock changes, NTP sync on boot).
+3. If the Print switch is on it also reads Klipper's print state every 2 s
    (a simple in-memory lookup, no G-code involved).
-4. Changes are faded in small steps; each step is sent as a single batched command.
-   Effects are only started/stopped — led_effect does the animating.
-5. Your manual changes (`SET_PIN`, `SET_LED`, UI sliders) are **kept until the
-   next schedule or print change** — use `SET_AUTO_LIGHT` to return to automatic.
-6. `AUTO_LIGHT_ENABLE/DISABLE` and disabled schedules are saved to `state_file`.
+4. Changes fade in small steps, and each step is sent as a single batched command.
+   Effects are only started/stopped; led_effect does the animating.
+5. Changes made outside Auto Light (`SET_PIN`, `SET_LED`, UI sliders) are kept until
+   the next schedule or print change.
 
 ### Protection Against Errors
 - Wrong light names, times or colours are reported as a clear config error on startup
 - Gaps or overlaps between schedules are logged as a warning in `klippy.log`
-- The last enabled schedule can't be disabled unless a `default` value is set
+- The last enabled schedule can't be disabled unless an `idle` value is set
 
 ---
 
@@ -427,15 +484,21 @@ Feel free to check the [issues page](https://github.com/Niiikoc/Klipper_Auto_Lig
 ### v3.0.0
 - 🌈 Support for `[neopixel]`, `[dotstar]`, `[led]`, `[pca9533]`, `[pca9632]` with colours (named, hex, RGBW, `colour@brightness`)
 - 🧩 Several lights per group (`lights:`), LED index ranges (`sb_leds:2-3`) and independent `[auto_light name]` groups
-- 🖨️ Print-aware values: `printing`, `paused`, `complete`, `error`, `cancelled`, `finish_hold`
+- 🖨️ Print-aware values: `printing`, `paused`, `complete`, `error`, `cancelled`, `show_result_for`
+- 🔀 Two independent switches per group, Schedule and Print: `AUTO_LIGHT_ENABLE/DISABLE PART=schedule|print`, toggle buttons in the panel
+- 👀 Switch positions, the manual value and its time left are shown in `AUTO_LIGHT_LIST_SCHEDULES`, the panel and the Moonraker status (`schedule_enabled`, `print_enabled`, `manual`, `manual_remaining`)
+- 📢 Switches that are off after a restart (also from a v2 state file) are announced in the console, and changing `enabled:` in the config now takes effect
+- ✋ One rule for manual values: they last until `AUTO_LIGHT_RESUME` or a print starts (or for `DURATION`), and the console says when they end
+- 🏷️ Renamed: `SET_AUTO_LIGHT` → `AUTO_LIGHT_RESUME`, `default:` → `idle:`, `finish_hold:` → `show_result_for:` (old names still work)
+- 🐛 `AUTO_LIGHT_RESUME` no longer reports "check executed" when automation is off; it reports what it did, or why it could not
 - 🌅 Smooth fades (`fade_time`)
 - ✨ klipper-led_effect integration: `effect:<name>` values with crossfades
 - 🖱️ `AUTO_LIGHT_MENU` control panel (Mainsail) and `auto_light_macros.cfg` buttons
-- ⏲️ `AUTO_LIGHT_SET ... DURATION=`; effects started by hand stop on their own after `finish_hold`
+- ⏲️ `AUTO_LIGHT_SET ... DURATION=`; effects started by hand stop on their own after `show_result_for`
 - ⏱️ Changes happen exactly at schedule boundaries instead of every `check_interval`
-- ✋ Manual light changes are no longer overwritten until the next scheduled change
 - 💾 Disabled schedules are now saved across restarts too
-- ✨ New `AUTO_LIGHT_SET` command, optional schedule names, `default` value, up to 10 schedules
+- 🧪 Simulation tests (`python -m unittest discover tests`) and test G-code files for the printer (`tests/printer/`)
+- ✨ New `AUTO_LIGHT_SET` command, optional schedule names, `idle` value, up to 10 schedules
 - 🛡️ Clear config errors, warnings for schedule gaps/overlaps, safer G-code execution from timers
 - 📄 `Macro.txt` renamed to `example.cfg`
 - ♻️ Existing v2 configs (`pin:` + `schedule_N`) work unchanged

@@ -222,6 +222,9 @@ class Schedule:
         return "%s-%s" % (_fmt_min(self.start), _fmt_min(self.end))
 
 
+PARTS = ('schedule', 'print')
+
+
 class AutoLightManager:
     """Owns the shared G-code commands and dispatches them by LIGHT=name."""
 
@@ -229,12 +232,15 @@ class AutoLightManager:
         self.lights = {}
         self.printer = printer
         self.gcode = gcode = printer.lookup_object('gcode')
-        for cmd in ('SET_AUTO_LIGHT', 'AUTO_LIGHT_ENABLE', 'AUTO_LIGHT_DISABLE',
-                    'AUTO_LIGHT_SET', 'AUTO_LIGHT_SCHEDULE_ENABLE',
-                    'AUTO_LIGHT_SCHEDULE_DISABLE', 'AUTO_LIGHT_LIST_SCHEDULES',
-                    'AUTO_LIGHT_MENU'):
+        for cmd in ('AUTO_LIGHT_RESUME', 'AUTO_LIGHT_ENABLE',
+                    'AUTO_LIGHT_DISABLE', 'AUTO_LIGHT_SET',
+                    'AUTO_LIGHT_SCHEDULE_ENABLE', 'AUTO_LIGHT_SCHEDULE_DISABLE',
+                    'AUTO_LIGHT_LIST_SCHEDULES', 'AUTO_LIGHT_MENU'):
             gcode.register_command(cmd, getattr(self, 'cmd_' + cmd),
                                    desc=getattr(self, 'cmd_%s_help' % cmd))
+        # v2 name of AUTO_LIGHT_RESUME
+        gcode.register_command('SET_AUTO_LIGHT', self.cmd_AUTO_LIGHT_RESUME,
+                               desc="Old name of AUTO_LIGHT_RESUME")
 
     def add(self, light):
         self.lights[light.light_name] = light
@@ -251,30 +257,41 @@ class AutoLightManager:
             raise gcmd.error("AutoLight: several lights are configured, add "
                              "LIGHT=<name> (one of: %s)"
                              % ", ".join(sorted(self.lights)))
-        return list(self.lights.values())
+        return sorted(self.lights.values(), key=lambda l: l.light_name)
 
-    cmd_SET_AUTO_LIGHT_help = "Re-apply the light value for the current time"
+    cmd_AUTO_LIGHT_RESUME_help = ("End manual values and show the automatic "
+                                  "value now")
 
-    def cmd_SET_AUTO_LIGHT(self, gcmd):
+    def cmd_AUTO_LIGHT_RESUME(self, gcmd):
         for light in self._select(gcmd):
-            light.request_update(force=True)
-        gcmd.respond_info("AutoLight: check executed")
+            gcmd.respond_info(light.resume())
 
-    cmd_AUTO_LIGHT_ENABLE_help = "Enable automatic light control"
+    @staticmethod
+    def _get_part(gcmd):
+        part = gcmd.get('PART', 'all').lower()
+        if part not in ('all',) + PARTS:
+            raise gcmd.error("AutoLight: PART must be schedule, print or all")
+        return part
+
+    def _switch(self, gcmd, on):
+        """Turn the Schedule and/or Print switch on/off (None = toggle)."""
+        part = self._get_part(gcmd)
+        for light in self._select(gcmd):
+            gcmd.respond_info(light.switch(part, on))
+
+    cmd_AUTO_LIGHT_ENABLE_help = ("Turn automatic control on "
+                                  "[PART=schedule|print|all] (saved)")
 
     def cmd_AUTO_LIGHT_ENABLE(self, gcmd):
-        for light in self._select(gcmd):
-            light.set_enabled(True)
-            gcmd.respond_info("AutoLight [%s]: ENABLED" % light.light_name)
+        self._switch(gcmd, True)
 
-    cmd_AUTO_LIGHT_DISABLE_help = "Disable automatic light control"
+    cmd_AUTO_LIGHT_DISABLE_help = ("Turn automatic control off "
+                                   "[PART=schedule|print|all] (saved)")
 
     def cmd_AUTO_LIGHT_DISABLE(self, gcmd):
-        for light in self._select(gcmd):
-            light.set_enabled(False)
-            gcmd.respond_info("AutoLight [%s]: DISABLED" % light.light_name)
+        self._switch(gcmd, False)
 
-    cmd_AUTO_LIGHT_SET_help = ("Temporarily set a value (VALUE=warm@0.5 or "
+    cmd_AUTO_LIGHT_SET_help = ("Set a value by hand (VALUE=warm@0.5 or "
                                "effect:name) [DURATION=seconds]")
 
     def cmd_AUTO_LIGHT_SET(self, gcmd):
@@ -285,14 +302,7 @@ class AutoLightManager:
         duration = gcmd.get_float('DURATION', None, minval=0.)
         for light in self._select(gcmd):
             value = light.parse_command_value(gcmd, text)
-            seconds = light.set_manual(value, duration)
-            if seconds:
-                until = "for %d s" % round(seconds)
-            else:
-                until = ("until the next change (SET_AUTO_LIGHT LIGHT=%s "
-                         "returns to automatic)" % light.light_name)
-            gcmd.respond_info("AutoLight [%s]: %s %s"
-                              % (light.light_name, describe(value), until))
+            gcmd.respond_info(light.set_manual(value, duration))
 
     cmd_AUTO_LIGHT_SCHEDULE_ENABLE_help = "Enable a schedule (ID=n)"
 
@@ -326,12 +336,11 @@ class AutoLightManager:
         lights = self._select(gcmd)
         if action == 'auto':
             for light in lights:
-                light.resume_auto()
+                gcmd.respond_info(light.resume())
         elif action == 'set':
             self._set_manual(gcmd)
-        elif action in ('enable', 'disable'):
-            for light in lights:
-                light.set_enabled(action == 'enable')
+        elif action in ('enable', 'disable', 'toggle'):
+            self._switch(gcmd, {'enable': True, 'disable': False}.get(action))
         elif action != 'show':
             raise gcmd.error("AutoLight: unknown ACTION '%s'" % action)
         if name is None and len(self.lights) > 1:
@@ -347,7 +356,7 @@ class AutoLightManager:
         lines = ["prompt_begin Auto Light"]
         for light in sorted(self.lights.values(), key=lambda l: l.light_name):
             lines.append("prompt_text %s: %s" % (light.light_name,
-                                                 light.summary()))
+                                                 light.status_line()))
         lines.append("prompt_button_group_start")
         for name in sorted(self.lights):
             lines.append("prompt_button %s|AUTO_LIGHT_MENU LIGHT=%s|info"
@@ -365,7 +374,7 @@ class AutoLightManager:
     def _show_light(self, light, back):
         cmd = "AUTO_LIGHT_MENU LIGHT=%s" % light.light_name
         lines = ["prompt_begin Auto Light: %s" % light.light_name,
-                 "prompt_text %s" % light.summary(),
+                 "prompt_text %s" % light.status_line(),
                  "prompt_button_group_start",
                  "prompt_button Auto|%s ACTION=auto|primary" % cmd]
         if light.targets:
@@ -384,12 +393,14 @@ class AutoLightManager:
                     lines.append("prompt_button %s|%s ACTION=set "
                                  "VALUE=effect:%s|info" % (eff, cmd, eff))
                 lines.append("prompt_button_group_end")
-        if light.enabled:
-            lines.append("prompt_footer_button Pause automation|%s "
-                         "ACTION=disable|warning" % cmd)
-        else:
-            lines.append("prompt_footer_button Resume automation|%s "
-                         "ACTION=enable|primary" % cmd)
+        lines.append("prompt_text Switches (click to toggle):")
+        lines.append("prompt_button_group_start")
+        for part in light.parts():
+            on = light.is_on(part)
+            lines.append("prompt_button %s: %s|%s ACTION=toggle PART=%s|%s"
+                         % (part.capitalize(), "ON" if on else "OFF", cmd,
+                            part, "success" if on else "warning"))
+        lines.append("prompt_button_group_end")
         if back:
             lines.append("prompt_footer_button Back|AUTO_LIGHT_MENU")
         lines += ["prompt_footer_button Close|AUTO_LIGHT_MENU ACTION=close",
@@ -410,16 +421,24 @@ class AutoLight:
         self.check_interval = config.getfloat('check_interval', 600.,
                                               minval=60.)
         self.fade_time = config.getfloat('fade_time', 1., minval=0.)
-        self.finish_hold = config.getfloat('finish_hold', 300., minval=0.)
-        self.enabled = config.getboolean('enabled', True)
+        self.show_result_for = self._renamed(
+            config, 'show_result_for', 'finish_hold', 300.,
+            lambda opt: config.getfloat(opt, None, minval=0.))
+        # `enabled` is the starting position of both switches. A switch
+        # changed with AUTO_LIGHT_ENABLE/DISABLE is saved and wins over it,
+        # until `enabled` itself is changed in the config (see _load_state).
+        self.config_enabled = config.getboolean('enabled', True)
+        self.schedule_enabled = self.print_enabled = self.config_enabled
 
         # --- values -------------------------------------------------------
         self.base_color = self._parse_opt(config, 'color', 'white',
                                           (1., 1., 1., 0.))
         if is_effect(self.base_color):
             raise config.error("AutoLight: 'color' must be a colour")
-        self.default_value = self._parse_opt(config, 'default', None,
-                                             base=self.base_color)
+        self.idle_value = self._renamed(
+            config, 'idle', 'default', None,
+            lambda opt: self._parse_opt(config, opt, None,
+                                        base=self.base_color))
         self.print_values = {}
         for state in PRINT_STATES:
             value = self._parse_opt(config, state, None, base=self.base_color)
@@ -444,9 +463,9 @@ class AutoLight:
                                    "Format: HH:MM-HH:MM=value [name]"
                                    % (i, raw, e))
             self.schedules.append(sched)
-        if not self.schedules and self.default_value is None:
+        if not self.schedules and self.idle_value is None:
             raise config.error("AutoLight: define at least one schedule_N "
-                               "or a 'default' value")
+                               "or an 'idle' value")
         self.schedules.sort(key=lambda s: s.start)
         self._warn_coverage()
 
@@ -471,20 +490,24 @@ class AutoLight:
         self.print_state = None
         self.print_state_since = 0.
         self.mode = None            # what the automation selected
-        self.manual = None          # value set by hand, until next change
+        self.manual = None          # value set by hand
         self.manual_timer = None    # ends a timed manual value
         self.manual_until = None    # reactor time the manual value ends
+        self.before_manual = None   # shown before the manual value
+        self.before_print = None    # shown before the print rule took over
         self.active_schedule = None
         self.target = None          # value the automation wants
         self.current = None         # last colour sent (None during effects)
         self.active_effect = None   # name of the effect we started
         self.force = False
+        self.shutdown = False
         self.update_timer = None
         self.output_timer = None
         self.pending = []           # scripts to send before the next fade
         self.fade = None
         self.generation = 0
         self.sending = False
+        self.startup_note = None
 
         manager = self.printer.lookup_object('auto_light_manager', None)
         if manager is None:
@@ -504,6 +527,17 @@ class AutoLight:
     # ===== setup ==========================================================
 
     @staticmethod
+    def _renamed(config, new, old, default, read):
+        """Read an option that has a new name; the old one still works."""
+        new_value, old_value = read(new), read(old)
+        if new_value is not None and old_value is not None:
+            raise config.error("AutoLight: '%s' is the new name of '%s', "
+                               "use only one of them" % (new, old))
+        if new_value is not None:
+            return new_value
+        return old_value if old_value is not None else default
+
+    @staticmethod
     def _parse_opt(config, option, default, fallback=None,
                    base=(1., 1., 1., 0.)):
         raw = config.get(option, default)
@@ -518,8 +552,8 @@ class AutoLight:
     def _all_values(self):
         values = [s.color for s in self.schedules]
         values += list(self.print_values.values())
-        if self.default_value is not None:
-            values.append(self.default_value)
+        if self.idle_value is not None:
+            values.append(self.idle_value)
         return values
 
     def known_effects(self):
@@ -540,7 +574,7 @@ class AutoLight:
         gaps = cover.count(0)
         overlaps = sum(1 for c in cover if c > 1)
         if gaps:
-            fallback = ("'default'" if self.default_value is not None
+            fallback = ("'idle'" if self.idle_value is not None
                         else "the earliest schedule")
             logging.warning("AutoLight [%s]: schedules leave %d minute(s) of "
                             "the day uncovered; %s is used there",
@@ -582,13 +616,62 @@ class AutoLight:
         self.update_timer = self.reactor.register_timer(self._update_cb)
         self.output_timer = self.reactor.register_timer(self._output_cb)
         self.manual_timer = self.reactor.register_timer(self._manual_end_cb)
-        if self.enabled:
-            self.request_update(force=True)
+        if self.startup_note:
+            logging.info(self.startup_note)
+            self.gcode.respond_info(self.startup_note)
+        self.force = True
+        self._arm_update()
 
     def _handle_shutdown(self):
-        self.enabled = False
+        self.shutdown = True
         self.fade = None
         self.pending = []
+
+    # ===== switches =======================================================
+
+    def parts(self):
+        """The switches this group has (no print values = no Print)."""
+        return PARTS if self.print_aware else PARTS[:1]
+
+    def is_on(self, part):
+        if part == 'print':
+            return self.print_enabled and self.print_aware
+        return self.schedule_enabled
+
+    def automation_on(self):
+        return any(self.is_on(p) for p in self.parts())
+
+    def _arm_update(self):
+        if self.update_timer is None:
+            return
+        waketime = self.reactor.NEVER
+        if self.automation_on() and not self.shutdown:
+            waketime = self.reactor.NOW
+        self.reactor.update_timer(self.update_timer, waketime)
+
+    def switch(self, part, on):
+        """AUTO_LIGHT_ENABLE/DISABLE. part: schedule, print or all;
+        on=None toggles. Returns the console message."""
+        if part == 'print' and not self.print_aware:
+            return ("AutoLight [%s]: has no print values (printing:, "
+                    "complete: ...), so there is no Print switch"
+                    % self.light_name)
+        parts = self.parts() if part == 'all' else (part,)
+        if on is None:
+            on = not any(self.is_on(p) for p in parts)
+        for p in parts:
+            setattr(self, p + '_enabled', on)
+        if not self.print_enabled:
+            self.print_state = None
+        self._save_state()
+        if not self.shutdown:
+            self._evaluate(self.reactor.monotonic(), force=on)
+        self._arm_update()
+        msg = "AutoLight [%s]: %s" % (self.light_name, self.status_line())
+        if on and self.manual is not None:
+            msg += ("\n  the manual value stays until AUTO_LIGHT_RESUME "
+                    "LIGHT=%s" % self.light_name)
+        return msg
 
     # ===== persistence ====================================================
 
@@ -608,19 +691,43 @@ class AutoLight:
         state = self._read_state_file().get(self.section)
         if not isinstance(state, dict):
             return
-        if 'enabled' in state:
-            self.enabled = bool(state['enabled'])
+        saved_config = state.get('config_enabled')
+        if isinstance(saved_config, bool) and \
+                saved_config != self.config_enabled:
+            # `enabled` was edited in the config since the switches were
+            # saved: the config is the newer choice.
+            source = "from 'enabled: %s' in the config" % self.config_enabled
+            self._save_state()
+        else:
+            source = "saved in %s" % os.path.basename(self.state_file)
+            if 'schedule' in state or 'print' in state:
+                self.schedule_enabled = bool(state.get(
+                    'schedule', self.config_enabled))
+                self.print_enabled = bool(state.get(
+                    'print', self.config_enabled))
+            elif 'enabled' in state:        # v2 / early v3: one switch
+                self.schedule_enabled = self.print_enabled = bool(
+                    state['enabled'])
         off = set(state.get('disabled_schedules', []))
         for s in self.schedules:
             s.enabled = s.id not in off
         self._ensure_one_schedule()
-        logging.info("AutoLight [%s]: restored state enabled=%s, disabled "
-                     "schedules=%s", self.light_name, self.enabled, sorted(off))
+        logging.info("AutoLight [%s]: restored schedule=%s print=%s, "
+                     "disabled schedules=%s", self.light_name,
+                     self.schedule_enabled, self.print_enabled, sorted(off))
+        off_parts = [p for p in self.parts() if not self.is_on(p)]
+        if off_parts:
+            self.startup_note = (
+                "AutoLight [%s]: %s OFF (%s) - AUTO_LIGHT_ENABLE LIGHT=%s "
+                "to turn on" % (self.light_name, " and ".join(off_parts),
+                                source, self.light_name))
 
     def _save_state(self):
         data = self._read_state_file()
         data[self.section] = {
-            'enabled': self.enabled,
+            'schedule': self.schedule_enabled,
+            'print': self.print_enabled,
+            'config_enabled': self.config_enabled,
             'disabled_schedules': [s.id for s in self.schedules
                                    if not s.enabled],
         }
@@ -634,7 +741,7 @@ class AutoLight:
                           self.state_file, e)
 
     def _ensure_one_schedule(self):
-        if (self.schedules and self.default_value is None
+        if (self.schedules and self.idle_value is None
                 and not any(s.enabled for s in self.schedules)):
             self.schedules[0].enabled = True
 
@@ -646,29 +753,77 @@ class AutoLight:
                 return s
         return None
 
+    def _print_rule(self, eventtime):
+        """Value of the Print switch now, or (None, None)."""
+        if not self.is_on('print') or self.print_stats is None:
+            return None, None
+        state = self.print_stats.get_status(eventtime).get('state')
+        prev = self.print_state
+        if state != prev:
+            self.print_state = state
+            # A result that was already there when we started watching is
+            # old news: don't show it.
+            self.print_state_since = (eventtime if prev is not None
+                                      else -1e9)
+            if (state == 'printing' and prev not in ('printing', 'paused')
+                    and self.manual is not None):
+                self._clear_manual()
+                self.gcode.respond_info("AutoLight [%s]: print started, "
+                                        "manual value ended" % self.light_name)
+        value = self.print_values.get(state)
+        if value is None and state == 'paused':
+            value = self.print_values.get('printing')
+        if value is not None and (
+                state in ('printing', 'paused')
+                or eventtime - self.print_state_since < self.show_result_for):
+            return value, state
+        return None, None
+
     def _desired(self, eventtime, now):
-        """Return (value, mode, schedule) the lights should show now."""
-        if self.print_stats is not None:
-            state = self.print_stats.get_status(eventtime).get('state')
-            if state != self.print_state:
-                self.print_state = state
-                self.print_state_since = eventtime
-            value = self.print_values.get(state)
-            if value is None and state == 'paused':
-                value = self.print_values.get('printing')
-            if value is not None and (
-                    state in ('printing', 'paused')
-                    or eventtime - self.print_state_since < self.finish_hold):
-                return value, state, None
-        sched = self._find_schedule(now.hour * 60 + now.minute)
-        if sched is not None:
-            return sched.color, 'schedule', sched
-        if self.default_value is not None:
-            return self.default_value, 'default', None
-        enabled = [s for s in self.schedules if s.enabled]
-        if enabled:
-            return enabled[0].color, 'schedule', enabled[0]
-        return None, 'none', None
+        """Return (value, mode, schedule) the switches ask for now.
+        value None = nothing to do, leave the light as it is."""
+        value, state = self._print_rule(eventtime)
+        if value is not None:
+            return value, state, None
+        if self.schedule_enabled:
+            sched = self._find_schedule(now.hour * 60 + now.minute)
+            if sched is not None:
+                return sched.color, 'schedule', sched
+            if self.idle_value is not None:
+                return self.idle_value, 'idle', None
+            enabled = [s for s in self.schedules if s.enabled]
+            if enabled:
+                return enabled[0].color, 'schedule', enabled[0]
+        elif self.before_print is not None:
+            # Schedule is off: after the print, go back to what was there.
+            return self.before_print, 'restored', None
+        return None, None, None
+
+    def _evaluate(self, eventtime, force=False, announce=True, now=None):
+        """Work out what the lights should show and apply it, unless a
+        manual value is active. Returns the automatic value (or None)."""
+        value, mode, sched = self._desired(
+            eventtime, now or datetime.datetime.now())
+        if mode in PRINT_STATES and self.mode not in PRINT_STATES:
+            shown = self._shown()
+            self.before_print = OFF if shown is None else shown
+        elif mode in ('schedule', 'idle'):
+            self.before_print = None
+        changed = value != self.target or mode != self.mode
+        self.mode = mode
+        self.active_schedule = sched
+        self.target = value
+        if value is None or self.manual is not None:
+            return value
+        if changed or force:
+            self.apply(value)
+            if mode == 'restored':
+                self.before_print = None
+            if changed and announce:
+                self.gcode.respond_info("AutoLight [%s]: %s -> %s"
+                                        % (self.light_name, self._label(),
+                                           describe(value)))
+        return value
 
     def _seconds_to_boundary(self, now):
         sod = (now.hour * 3600 + now.minute * 60 + now.second
@@ -682,29 +837,19 @@ class AutoLight:
         return best + 0.5
 
     def _update_cb(self, eventtime):
-        if not self.enabled:
+        if self.shutdown or not self.automation_on():
             return self.reactor.NEVER
         now = datetime.datetime.now()
         try:
-            value, mode, sched = self._desired(eventtime, now)
-            changed = value != self.target or mode != self.mode
-            self.mode = mode
-            self.active_schedule = sched
-            if value is not None and (changed or self.force):
-                self.target = value
-                self._clear_manual()
-                self.apply(value)
-                if changed:
-                    label = sched.name if sched is not None else mode
-                    self.gcode.respond_info("AutoLight [%s]: %s -> %s"
-                                            % (self.light_name, label,
-                                               describe(value)))
+            self._evaluate(eventtime, force=self.force, now=now)
             self.force = False
         except Exception:
             logging.exception("AutoLight [%s]: update failed",
                               self.light_name)
-        wait = min(self.check_interval, self._seconds_to_boundary(now))
-        if self.print_stats is not None:
+        wait = self.check_interval
+        if self.schedule_enabled:
+            wait = min(wait, self._seconds_to_boundary(now))
+        if self.is_on('print') and self.print_stats is not None:
             wait = min(wait, PRINT_POLL)
         return eventtime + wait
 
@@ -783,7 +928,11 @@ class AutoLight:
         t = float(fade['step']) / fade['steps']
         scripts = []
         for target, start in zip(self.targets, fade['from']):
-            color = tuple(a + (b - a) * t for a, b in zip(start, fade['to']))
+            if fade['step'] >= fade['steps']:
+                color = fade['to']        # exact, no rounding drift
+            else:
+                color = tuple(a + (b - a) * t
+                              for a, b in zip(start, fade['to']))
             target.current = color
             script = target.script(color)
             if script != target.last_script:
@@ -812,7 +961,11 @@ class AutoLight:
         finally:
             self.sending = False
 
-    # ===== command helpers ================================================
+    # ===== manual values ==================================================
+    #
+    # One rule: a manual value lasts until AUTO_LIGHT_RESUME, until a print
+    # starts (when the Print switch is on), or until DURATION runs out.
+    # Effects get DURATION = show_result_for by default.
 
     def parse_command_value(self, gcmd, text):
         try:
@@ -826,62 +979,90 @@ class AutoLight:
                              "only effects or off" % self.light_name)
         return value
 
+    def _manual_ends(self):
+        """Human description of what ends an open-ended manual value."""
+        ends = "until AUTO_LIGHT_RESUME LIGHT=%s" % self.light_name
+        if self.is_on('print'):
+            ends += " or a print starts"
+        return ends
+
     def set_manual(self, value, duration=None):
-        """Show a value by hand. Effects end on their own after
-        `finish_hold` seconds unless DURATION is given (0 = until the next
-        automatic change); colours last until the next change by default.
-        Returns the duration in seconds (0 = until the next change)."""
+        """Show a value by hand. Returns the console message."""
         if duration is None:
-            duration = self.finish_hold if is_effect(value) else 0.
+            duration = self.show_result_for if is_effect(value) else 0.
+        if self.manual is None:
+            shown = self._shown()
+            self.before_manual = OFF if shown is None else shown
         self.manual = value
         self.apply(value)
         self.manual_until = None
+        waketime = self.reactor.NEVER
+        if duration > 0.:
+            waketime = self.manual_until = self.reactor.monotonic() + duration
         if self.manual_timer is not None:
-            waketime = self.reactor.NEVER
-            if duration > 0.:
-                waketime = self.manual_until = (self.reactor.monotonic()
-                                                + duration)
             self.reactor.update_timer(self.manual_timer, waketime)
-        return duration
+        if duration > 0.:
+            end = datetime.datetime.now() + datetime.timedelta(
+                seconds=duration)
+            until = "for %d s (until %02d:%02d:%02d), then %s" % (
+                round(duration), end.hour, end.minute, end.second,
+                "automatic" if self.automation_on() else "back to "
+                + describe(self.before_manual))
+        else:
+            until = self._manual_ends()
+        return "AutoLight [%s]: %s %s" % (self.light_name, describe(value),
+                                          until)
 
     def _clear_manual(self):
         self.manual = None
         self.manual_until = None
+        self.before_manual = None
         if self.manual_timer is not None:
             self.reactor.update_timer(self.manual_timer, self.reactor.NEVER)
 
     def _manual_end_cb(self, eventtime):
-        if self.manual is not None:
-            self.manual = None
-            self.manual_until = None
-            if self.enabled:
-                self.request_update(force=True)
-            elif self.active_effect:
-                self.apply(OFF)          # paused: just stop the effect
+        if self.manual is None or self.shutdown:
+            return self.reactor.NEVER
+        before = self.before_manual
+        self._clear_manual()
+        value = None
+        if self.automation_on():
+            value = self._evaluate(eventtime, force=True, announce=False)
+        if value is not None:
+            result = "%s (%s)" % (describe(value), self._label())
+        elif before is not None:
+            self.apply(before)
+            result = "%s (as before)" % describe(before)
+        else:
+            result = describe(self._shown())
+        self.gcode.respond_info("AutoLight [%s]: manual value ended -> %s"
+                                % (self.light_name, result))
         return self.reactor.NEVER
 
-    def resume_auto(self):
-        if not self.enabled:
-            self.set_enabled(True)
+    def resume(self):
+        """AUTO_LIGHT_RESUME: end the manual value, show the automatic
+        value now. Returns the console message (never claims more than
+        actually happened)."""
+        had_manual = self.manual is not None
+        self._clear_manual()
+        value = None
+        if self.automation_on() and not self.shutdown:
+            value = self._evaluate(self.reactor.monotonic(), force=True,
+                                   announce=False)
+        name = self.light_name
+        if value is not None:
+            return "AutoLight [%s]: automatic -> %s (%s)" % (
+                name, describe(value), self._label())
+        if not self.automation_on():
+            why = ("%s OFF - AUTO_LIGHT_ENABLE LIGHT=%s to turn on"
+                   % (" and ".join(self.parts()), name))
         else:
-            self.request_update(force=True)
-
-    def request_update(self, force=False):
-        if force:
-            self.force = True
-        if self.update_timer is not None and self.enabled:
-            self.reactor.update_timer(self.update_timer, self.reactor.NOW)
-
-    def set_enabled(self, enabled):
-        self.enabled = enabled
-        if not enabled:
-            self.mode = None
-            if self.update_timer is not None:
-                self.reactor.update_timer(self.update_timer,
-                                          self.reactor.NEVER)
-        self._save_state()
-        if enabled:
-            self.request_update(force=True)
+            why = ("schedule OFF and no print value applies now - "
+                   "AUTO_LIGHT_ENABLE PART=schedule LIGHT=%s" % name)
+        return "AutoLight [%s]: nothing automatic to show (%s)%s; light " \
+               "stays %s" % (name, why,
+                             ", manual value ended" if had_manual else "",
+                             describe(self._shown()))
 
     def set_schedule_enabled(self, gcmd, sid, enabled):
         sched = next((s for s in self.schedules if s.id == sid), None)
@@ -893,16 +1074,18 @@ class AutoLight:
                               % (self.light_name, sched.name,
                                  "enabled" if enabled else "disabled"))
             return
-        if (not enabled and self.default_value is None
+        if (not enabled and self.idle_value is None
                 and sum(s.enabled for s in self.schedules) <= 1):
             raise gcmd.error("AutoLight: cannot disable the last enabled "
-                             "schedule (or set a 'default' value)")
+                             "schedule (or set an 'idle' value)")
         sched.enabled = enabled
         self._save_state()
         gcmd.respond_info("AutoLight [%s]: %s %s"
                           % (self.light_name,
                              "enabled" if enabled else "disabled", sched.name))
-        self.request_update()
+        self._arm_update()
+
+    # ===== status =========================================================
 
     def _shown(self):
         if self.active_effect:
@@ -911,40 +1094,57 @@ class AutoLight:
             return self.fade['to']
         return self.current
 
-    def summary(self):
-        if not self.enabled:
-            state = "automation paused"
-        elif self.manual is not None:
-            if self.manual_until is not None:
-                left = max(0., self.manual_until - self.reactor.monotonic())
-                state = "manual, %d s left" % round(left)
-            else:
-                state = "manual until next change"
-        elif self.active_schedule is not None:
-            state = "%s (%s)" % (self.active_schedule.name,
-                                 self.active_schedule.span())
-        else:
-            state = self.mode or "-"
-        return "%s, %s" % (describe(self._shown()), state)
+    def _label(self):
+        """Why the automation picked its current value."""
+        if self.active_schedule is not None:
+            return "%s %s" % (self.active_schedule.name,
+                              self.active_schedule.span())
+        if self.mode == 'restored':
+            return "as before the print"
+        return self.mode or "-"
+
+    def _manual_remaining(self):
+        if self.manual is None or self.manual_until is None:
+            return None
+        return max(0., self.manual_until - self.reactor.monotonic())
+
+    def _reason(self):
+        """Why the light shows what it shows now."""
+        if self.manual is not None:
+            left = self._manual_remaining()
+            if left is not None:
+                return "manual, %d s left" % round(left)
+            return "manual, " + self._manual_ends()
+        if self.mode is not None:
+            return self._label()
+        if not self.automation_on():
+            return "automation off, left as is"
+        return "no rule active, left as is"
+
+    def status_line(self):
+        """e.g. 'schedule ON | print ON | now: 30% (Evening 19:00-23:00)'"""
+        print_sw = ("ON" if self.print_enabled else "OFF") \
+            if self.print_aware else "n/a"
+        return "schedule %s | print %s | now: %s (%s)" % (
+            "ON" if self.schedule_enabled else "OFF", print_sw,
+            describe(self._shown()), self._reason())
 
     def report(self):
-        lines = ["AutoLight [%s]: %s, mode: %s, now: %s"
-                 % (self.light_name,
-                    "ENABLED" if self.enabled else "DISABLED",
-                    "manual" if self.manual is not None else self.mode or "-",
-                    describe(self._shown())),
+        lines = ["AutoLight [%s]: %s" % (self.light_name, self.status_line()),
                  "  lights: " + (", ".join(t.spec for t in self.targets)
                                  or "(effects only)")]
         for s in self.schedules:
             lines.append("  %d. %s [%s]: %s = %s"
                          % (s.id, s.name, "ENABLED" if s.enabled
                             else "DISABLED", s.span(), describe(s.color)))
-        if self.default_value is not None:
-            lines.append("  default: %s" % describe(self.default_value))
+        if self.idle_value is not None:
+            lines.append("  idle: %s" % describe(self.idle_value))
         for state in PRINT_STATES:
             if state in self.print_values:
                 lines.append("  %s: %s" % (state,
                                            describe(self.print_values[state])))
+        if self.print_aware:
+            lines.append("  results shown for %d s" % self.show_result_for)
         return "\n".join(lines)
 
     # ===== Moonraker / UI status ==========================================
@@ -954,8 +1154,16 @@ class AutoLight:
         sched = self.active_schedule
         current = None if self.active_effect else self.current
         target = None if is_effect(self.target) else self.target
+        remaining = self._manual_remaining()
         return {
-            'enabled': self.enabled,
+            'enabled': self.automation_on(),
+            'schedule_enabled': self.schedule_enabled,
+            'print_enabled': self.is_on('print'),
+            'manual': self.manual is not None,
+            'manual_value': (describe(self.manual)
+                             if self.manual is not None else None),
+            'manual_remaining': (round(remaining, 1)
+                                 if remaining is not None else None),
             'light': self.light_name,
             'mode': 'manual' if self.manual is not None else self.mode,
             'effect': self.active_effect,
