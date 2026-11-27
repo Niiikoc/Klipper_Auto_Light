@@ -265,14 +265,6 @@ class Sim(unittest.TestCase):
     def set_time(self, hh, mm):
         FakeClock.now_value = FakeClock.now_value.replace(hour=hh, minute=mm)
 
-    def write_state(self, data):
-        with open(os.path.join(self.dir, 'auto_light_state.json'), 'w') as f:
-            json.dump(data, f)
-
-    def read_state(self):
-        with open(os.path.join(self.dir, 'auto_light_state.json')) as f:
-            return json.load(f)
-
     def print_cycle(self, result='complete'):
         self.ps.state = 'printing'
         self.advance(3)
@@ -354,7 +346,7 @@ class TestSwitches(Sim):
         self.set_time(19, 0)
         self.advance(700)
         self.assertEqual(self.pin(), 0.0)
-        self.assertTrue(self.light.schedule_enabled)
+        self.assertTrue(self.light.is_on('schedule'))
         self.set_time(7, 0)
         self.advance(700)
         self.assertEqual(self.pin(), 1.0)
@@ -362,13 +354,13 @@ class TestSwitches(Sim):
     def test_toggle_from_panel(self):
         self.boot()
         self.cmd('AUTO_LIGHT_MENU', ACTION='toggle', PART='schedule')
-        self.assertFalse(self.light.schedule_enabled)
-        self.assertTrue(self.light.print_enabled)
+        self.assertFalse(self.light.is_on('schedule'))
+        self.assertTrue(self.light.is_on('print'))
         out = "\n".join(self.gcode.messages)
         self.assertIn('Schedule: OFF', out)
         self.assertIn('Print: ON', out)
         self.cmd('AUTO_LIGHT_MENU', ACTION='toggle', PART='schedule')
-        self.assertTrue(self.light.schedule_enabled)
+        self.assertTrue(self.light.is_on('schedule'))
 
     def test_print_part_without_print_values(self):
         self.boot({'lights': 'caselight', 'schedule_1': '07:00-19:00=1.0'})
@@ -386,7 +378,7 @@ class TestPrintStates(Sim):
         self.ps.state = 'paused'
         self.advance(3)
         self.assertEqual(self.pin(), 0.8)
-        self.assertEqual(self.light.mode, 'paused')
+        self.assertEqual(self.light.decision.mode, 'paused')
 
     def test_error_and_cancelled(self):
         self.boot(dict(BASIC, error='0.1', cancelled='0.0'))
@@ -403,13 +395,6 @@ class TestPrintStates(Sim):
         self.cmd('AUTO_LIGHT_DISABLE', PART='print')
         self.cmd('AUTO_LIGHT_ENABLE', PART='print')
         self.assertEqual(self.pin(), 1.0)
-
-    def test_startup_both_off_sends_nothing(self):
-        self.write_state({'auto_light': {'schedule': False, 'print': False,
-                                         'config_enabled': True}})
-        self.boot()
-        self.assertEqual(self.gcode.scripts, [])
-        self.assertIn('automation off', self.light.status_line())
 
 
 class TestResume(Sim):
@@ -497,14 +482,14 @@ class TestManual(Sim):
         self.advance(61)
         self.assertTrue(any('EFFECT=rainbow STOP=1' in s
                             for s in self.gcode.scripts))
-        self.assertIsNone(self.light.active_effect)
+        self.assertIsNone(self.light.output.active_effect)
 
     def test_effect_with_everything_off_stops(self):
         self.boot(dict(BASIC, lights='sb_leds'))
         self.cmd('AUTO_LIGHT_DISABLE')
         self.cmd('AUTO_LIGHT_SET', VALUE='effect:rainbow')
         self.advance(61)
-        self.assertIsNone(self.light.active_effect)
+        self.assertIsNone(self.light.output.active_effect)
 
     def test_status_fields(self):
         self.boot()
@@ -516,68 +501,51 @@ class TestManual(Sim):
         self.assertEqual(st['mode'], 'manual')
 
 
-class TestPersistence(Sim):
+class TestNothingSaved(Sim):
 
-    def test_switches_saved_and_restored_with_notice(self):
-        self.boot()
-        self.cmd('AUTO_LIGHT_DISABLE', PART='schedule')
-        self.assertEqual(self.read_state()['auto_light']['schedule'], False)
-        self.boot()
-        self.assertFalse(self.light.schedule_enabled)
-        self.assertTrue(self.light.print_enabled)
-        notice = self.gcode.messages[0]
-        self.assertIn('AutoLight [default]: schedule OFF (saved in '
-                      'auto_light_state.json)', notice)
-        self.assertIn('AUTO_LIGHT_ENABLE LIGHT=default', notice)
-
-    def test_v2_state_file(self):
-        self.write_state({'enabled': False})              # v2.1 format
-        self.boot()
-        self.assertFalse(self.light.schedule_enabled)
-        self.assertFalse(self.light.print_enabled)
-        self.assertIn('schedule and print OFF (saved',
-                      self.gcode.messages[0])
-
-    def test_early_v3_state_file(self):
-        self.write_state({'auto_light': {'enabled': False,
-                                         'disabled_schedules': [2]}})
-        self.boot()
-        self.assertFalse(self.light.schedule_enabled)
-        self.assertFalse(self.light.schedules[1].enabled)
-
-    def test_config_change_wins_over_saved_switch(self):
+    def test_disable_lasts_until_restart(self):
         self.boot()
         self.cmd('AUTO_LIGHT_DISABLE')
-        self.boot(dict(BASIC, enabled=False))   # user edits the config
-        self.assertFalse(self.light.schedule_enabled)
-        self.assertIn("from 'enabled: False' in the config",
-                      self.gcode.messages[0])
-        self.cmd('AUTO_LIGHT_ENABLE')
-        self.boot(dict(BASIC, enabled=False))   # unchanged config: saved wins
-        self.assertTrue(self.light.schedule_enabled)
-        self.boot(BASIC)                        # enabled: back to True
-        self.assertTrue(self.light.schedule_enabled)
+        self.cmd('AUTO_LIGHT_SCHEDULE_DISABLE', ID=2)
+        self.boot()
+        self.assertTrue(self.light.is_on('schedule'))
+        self.assertTrue(self.light.is_on('print'))
+        self.assertTrue(self.light.schedules[1].enabled)
+        self.assertEqual(os.listdir(self.dir), [])     # no state file
 
-    def test_no_notice_when_all_on(self):
+    def test_old_state_file_is_ignored(self):
+        with open(os.path.join(self.dir, 'auto_light_state.json'), 'w') as f:
+            json.dump({'enabled': False}, f)            # v2.1 format
         self.boot()
+        self.assertTrue(self.light.is_on('schedule'))
+
+    def test_enabled_false_in_config(self):
+        self.boot(dict(BASIC, enabled=False))
+        self.assertFalse(self.light.automation_on())
+        self.assertEqual(self.gcode.scripts, [])
+        self.assertIn('automation off', self.light.status_line())
         self.cmd('AUTO_LIGHT_ENABLE')
-        self.boot()
-        self.assertFalse(any('OFF' in m for m in self.gcode.messages))
+        self.assertEqual(self.pin(), 1.0)
+
+    def test_state_file_option_still_accepted(self):
+        self.boot(dict(BASIC, state_file='~/x.json'))
+        self.assertEqual(self.pin(), 1.0)
 
 
 class TestConfigNames(Sim):
 
-    def test_old_names(self):
-        light = self.boot({'lights': 'caselight', 'default': '0.3',
-                           'complete': '1.0', 'finish_hold': 42})
-        self.assertEqual(light.show_result_for, 42)
-        self.assertEqual(self.pin(), 0.3)
-        self.assertEqual(light.mode, 'idle')
+    def test_renamed_options_give_clear_error(self):
+        for old, new in (('default', 'idle'),
+                         ('finish_hold', 'show_result_for')):
+            with self.assertRaises(ConfigError) as ctx:
+                self.boot(dict(BASIC, **{old: '0.3'}))
+            self.assertIn("'%s' is now called '%s'" % (old, new),
+                          str(ctx.exception))
 
-    def test_both_names_is_error(self):
-        with self.assertRaises(ConfigError):
-            self.boot({'lights': 'caselight', 'default': '0.3',
-                       'idle': '0.3'})
+    def test_idle(self):
+        light = self.boot({'lights': 'caselight', 'idle': '0.3'})
+        self.assertEqual(self.pin(), 0.3)
+        self.assertEqual(light.decision.mode, 'idle')
 
     def test_report(self):
         self.boot()
@@ -595,7 +563,7 @@ class TestMultipleGroups(Sim):
         })
         msg = self.cmd('AUTO_LIGHT_DISABLE', PART='print')
         self.assertIn('[logo]: has no print values', msg)
-        self.assertFalse(self.lights['case'].print_enabled)
+        self.assertFalse(self.lights['case'].is_on('print'))
 
 
 if __name__ == '__main__':
